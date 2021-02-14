@@ -1,0 +1,6 @@
+*.log
+*.pyc
+**/__pycache__/
+.env
+.secrets
+.list-local

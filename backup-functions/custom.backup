@@ -1,0 +1,29 @@
+#!/bin/bash
+# shellcheck disable=SC1091,SC2034,SC2154
+. /usr/local/include/osshelp/backup-functions.sh
+
+# Learn this https://oss.help/kb2676, before using this template.
+cbver=1.02
+# general options
+
+# functions options, excludes, etc
+
+# main functions
+function make_backup() {
+   show_notice "Backup process started..."
+    test -d "${backup_dir}" && clean_dir "${backup_dir}" "${local_days}"
+
+    check_free_space "${backup_dir}" && {
+#       backuping code here
+        save_backup_size "${backup_dir}/${current_date}"
+    }
+}
+
+function upload_backup() {
+    show_notice "Upload process started..."
+    # uploading code here
+    show_notice "Upload process ended."
+}
+
+# uncomment main function, when script will be finished
+#main "${@}"

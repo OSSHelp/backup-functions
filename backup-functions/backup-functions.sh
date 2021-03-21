@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.20
+bfver=3.22
 
 ## default variables
 myhostname=$(hostname -f)
@@ -883,7 +883,7 @@ EOF
 }
 
 function pushgateway_prepare_vars() {
-    hostname=$(hostname); script_name=${0##*/}; backup_is_running=0
+    source=$(hostname); script_name=${0##*/}; backup_is_running=0
     test -d "${backup_dir}/${current_date}" && {
         pushgateway_backup_files_quantity=$(find "${backup_dir}/${current_date}" -type f | wc -l)
         pushgateway_last_backup_size=$(du -sb "${backup_dir}/${current_date}" | awk '{print $1}')
@@ -899,37 +899,37 @@ function pushgateway_send_result() {
     cat <<EOF | "${curl}" -sq "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
 # HELP backup_script_info Information about script and library.
 # TYPE backup_script_info gauge
-backup_script_info{script_name="${script_name}",hostname="${hostname}",cbver="${cbver}",bfver="${bfver}"} 1
+backup_script_info{source="${source}",script_name="${script_name}",cbver="${cbver}",bfver="${bfver}"} 1
 # HELP backup_is_running Сurrent state of the backup script (1 = running, 0 = exited)
 # TYPE backup_is_running gauge
-backup_is_running{script_name="${script_name}",hostname="${hostname}"} ${backup_is_running}
+backup_is_running{source="${source}",script_name="${script_name}"} ${backup_is_running}
 # HELP backup_failure Script exit status (1 = error, 0 = success)
 # TYPE backup_failure gauge
-script_failure{script_name="${script_name}"} ${backup_err_code}
+backup_script_failure{source="${source}",script_name="${script_name}"} ${backup_err_code}
 # HELP backup_duration_seconds Script execution time, in seconds.
 # TYPE backup_duration_seconds gauge
-backup_duration_seconds{script_name="${script_name}"} ${pushgateway_backup_duration}
-# HELP backup_start_time_seconds Start time of the backup script since unix epoch in seconds.
+backup_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_duration}
+# HELP backup_start_time_seconds Unix timestamp of the backup script execution start.
 # TYPE backup_start_time_seconds counter
-backup_start_time_seconds{script_name="${script_name}"} ${backup_start_time}
-# HELP backup_end_time_seconds End time of the backup script since unix epoch in seconds.
+backup_start_time_seconds{source="${source}",script_name="${script_name}"} ${backup_start_time}
+# HELP backup_end_time_seconds Unix timestamp of the backup script execution end.
 # TYPE backup_end_time_seconds counter
-backup_end_time_seconds{script_name="${script_name}"} ${backup_end_time}
+backup_end_time_seconds{source="${source}",script_name="${script_name}"} ${backup_end_time}
 # HELP backup_scheme Backup scheme.
 # TYPE backup_scheme gauge
-backup_scheme{script_name="${script_name}",backup_type="local"} ${local_days}
-backup_scheme{script_name="${script_name}",backup_type="daily"} ${remote_backups_daily}
-backup_scheme{script_name="${script_name}",backup_type="weekly"} ${remote_backups_weekly}
-backup_scheme{script_name="${script_name}",backup_type="monthly"} ${remote_backups_monthly}
+backup_scheme{source="${source}",script_name="${script_name}",backup_type="local"} ${local_days}
+backup_scheme{source="${source}",script_name="${script_name}",backup_type="daily"} ${remote_backups_daily}
+backup_scheme{source="${source}",script_name="${script_name}",backup_type="weekly"} ${remote_backups_weekly}
+backup_scheme{source="${source}",script_name="${script_name}",backup_type="monthly"} ${remote_backups_monthly}
 # HELP backup_size_bytes Last backup size in bytes.
 # TYPE backup_size_bytes gauge
-backup_size_bytes{script_name="${script_name}",backup_dir="${backup_dir}"} ${pushgateway_last_backup_size}
+backup_size_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${pushgateway_last_backup_size}
 # HELP backup_files_quantity Total quantity of files in the backup.
 # TYPE backup_files_quantity gauge
-backup_files_quantity{script_name="${script_name}",backup_dir="${backup_dir}"} ${pushgateway_backup_files_quantity}
+backup_files_quantity{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${pushgateway_backup_files_quantity}
 # HELP backup_required_space_bytes Required space in bytes for the backup plus some free space.
 # TYPE backup_required_space_bytes gauge
-backup_required_space_bytes{script_name="${script_name}",backup_dir="${backup_dir}",backup_size_percent="${backup_size_percent}",minimum_free_space_percent="${minimum_free_space_percent}",freespace_ratio="${freespace_ratio}"} ${pushgateway_backup_required_space}
+backup_required_space_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}",backup_size_percent="${backup_size_percent}",minimum_free_space_percent="${minimum_free_space_percent}",freespace_ratio="${freespace_ratio}"} ${pushgateway_backup_required_space}
 EOF
 
     test $? -eq 0 || {

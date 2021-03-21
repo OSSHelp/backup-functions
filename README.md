@@ -67,6 +67,8 @@ There’re install/update scripts in the repository. Command for installation (b
 curl -s https://oss.help/scripts/backup/backup-functions/install.sh | bash
 ```
 
+Or you can use this [Ansible role](https://github.com/OSSHelp/ansible-backup-functions) to install it.
+
 If you need, you can run the custom.backup template by hands with following keys:
 
 * `-b` or `--backup` -- runs only `make_backup` function

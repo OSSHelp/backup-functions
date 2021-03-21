@@ -5,7 +5,7 @@ umask 0077
 export LANG=C
 export LC_ALL=C
 
-bfver=3.20
+bfver=3.22
 cbver=1.02
 
 index_url="${REMOTE_URI:-https://oss.help/scripts/backup/backup-functions/.list}"

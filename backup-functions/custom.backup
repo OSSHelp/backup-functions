@@ -3,7 +3,7 @@
 . /usr/local/include/osshelp/backup-functions.sh
 
 # Learn this https://oss.help/kb2676, before using this template.
-cbver=1.02
+cbver=1.02.0
 # general options
 
 # functions options, excludes, etc

@@ -1,5 +1,5 @@
 ## OSSHelp backup functions library.
-# shellcheck disable=SC2128,SC2191,SC2207,SC2164,SC1090,SC2219,SC2206
+# shellcheck disable=SC2128,SC2191,SC2207,SC2164,SC1090,SC2219,SC2206,SC2086
 ## TODO
 ## https://oss.help/57009
 ## https://oss.help/25714
@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.22
+bfver=3.26.0
 
 ## default variables
 myhostname=$(hostname -f)
@@ -23,9 +23,10 @@ curl=$(command -v curl)
 test -x "${nproc}" && core_num=$("${nproc}" 2>/dev/null)
 
 ## Pushgateway options
-pushgateway_url="http://netdata-master:9091/metrics/job/${0##*/}"
+pushgateway_url="http://netdata-master:9091/metrics/job/${0##*/}/source/${myhostname%.*}"
 pushgateway_opts=()
 no_pushgateway=0
+backup_start_time=$(date +%s)
 
 ## scheme vars
 local_days=0
@@ -111,7 +112,7 @@ gilab_rake_bin='/usr/bin/gitlab-rake'
 ## backup_file=$backup_dir/$(backup_gitlab)    # extract backup filename from gitlab-rake output
 ## mkdir -p "$backup_dir/$current_date/"; chmod 775 "$backup_dir/$current_date/"; chown :git "$backup_dir/$current_date/"
 ##    { test -f "$backup_file" && mv "$backup_file" "$backup_dir/$current_date/" &&  show_notice "Moving backup file to it's folder..."; } \
-##        || show_error "Backup file not found, check logs"
+##        || show_error "Backup file not found, check logs."
 
 ## lftp vars
 lftp_parallel=1
@@ -168,25 +169,15 @@ rsync_opts=(-av)
 ## use -p№, where № is the number of processors cores
 archiver_opts=()
 
-## choosing compress
-gzip=$(command -v gzip 2>/dev/null); bzcompress=$(command -v bzip2 2>/dev/null)
-test "${core_num:-1}" -gt 2 && { pbzip=$(command -v pbzip2 2>/dev/null) && { archiver_opts=(-p$(( core_num / 2 ))); bzcompress="${pbzip}"; }; }
-archiver_prog="${bzcompress:-${gzip}}"
-test -x "${archiver_prog}" || { echo "[ERROR $(date '+%Y/%m/%d-%H:%M:%S')] No compress util or ${archiver_prog} has no execution flag. Fix it first."; exit 1; }
-
-case "${archiver_prog##*/}" in
-    'pbzip2' ) compress_ext='bz2' ;;
-    'bzip2'  ) compress_ext='bz2' ;;
-    'gzip'   ) compress_ext='gz' ;;
-esac
-
-## reset error flag
-err=0
+## reset global flags
+glbl_backup_size=0
+glbl_backup_files_cnt=0
+glbl_err=0
 
 function show_error() {
     local message="${1}"; local funcname="${2}"; log_date=$(date '+%Y/%m/%d:%H:%M:%S')
     echo -e "[ERROR.${funcname} ${log_date}] ${message}" >&2
-    err=1
+    glbl_err=1
 }
 
 function show_notice() {
@@ -194,13 +185,108 @@ function show_notice() {
     echo -e "[NOTICE.${funcname} ${log_date}] ${message}"
 }
 
+function pushgateway_start_backup() {
+    local err=0; hostname=$(hostname); script_name=${0##*/}; backup_is_running=1
+    cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
+# HELP backup_is_running Сurrent state of the backup script (1 = running, 0 = exited)
+# TYPE backup_is_running gauge
+backup_is_running{script_name="${script_name}",hostname="${hostname}"} ${backup_is_running}
+EOF
+    test $? -eq 0 || {
+        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
+        local err=1;
+        return "${err}";
+    }
+}
+
+function backup_size_and_files_count() {
+    local file="${1}"; local err=0
+    test -f "${file}" || { show_error "Can not access ${file}!"; err=1;}
+    test -f "${file}" && { 
+        backup_size=$(du -sb "${file}" | awk '{print $1}')
+        glbl_backup_size=$((${glbl_backup_size} + ${backup_size}))
+        glbl_backup_files_cnt=$((${glbl_backup_files_cnt} + 1))
+    }
+    return "${err}"
+}
+
+function pushgateway_prepare_vars() {
+    source=$(hostname); script_name=${0##*/}; backup_is_running=0
+    backup_end_time=$(date +%s)
+    pushgateway_last_backup_size="${glbl_backup_size}"
+    pushgateway_backup_files_quantity="${glbl_backup_files_cnt}"
+    pushgateway_backup_required_space=$((pushgateway_last_backup_size+pushgateway_last_backup_size*backup_size_percent/100))
+    pushgateway_backup_duration=$((backup_end_time-backup_start_time))
+}
+
+function pushgateway_send_result() {
+    local err=0; local backup_err_code="${1}"
+    test "${no_pushgateway}" -eq 1 && { show_notice "Pushgateway usage disabled."; return 0; }
+    test "${no_pushgateway}" -ne 1 && {
+        pushgateway_prepare_vars
+        cat <<EOF | "${curl}" -sq "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
+# HELP backup_script_info Information about script and library.
+# TYPE backup_script_info gauge
+backup_script_info{source="${source}",script_name="${script_name}",cbver="${cbver}",bfver="${bfver}"} 1
+# HELP backup_is_running Сurrent state of the backup script (1 = running, 0 = exited)
+# TYPE backup_is_running gauge
+backup_is_running{source="${source}",script_name="${script_name}"} ${backup_is_running}
+# HELP backup_failure Script exit status (1 = error, 0 = success)
+# TYPE backup_failure gauge
+backup_script_failure{source="${source}",script_name="${script_name}"} ${backup_err_code}
+# HELP backup_duration_seconds Script execution time, in seconds.
+# TYPE backup_duration_seconds gauge
+backup_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_duration}
+# HELP backup_start_time_seconds Unix timestamp of the backup script execution start.
+# TYPE backup_start_time_seconds counter
+backup_start_time_seconds{source="${source}",script_name="${script_name}"} ${backup_start_time}
+# HELP backup_end_time_seconds Unix timestamp of the backup script execution end.
+# TYPE backup_end_time_seconds counter
+backup_end_time_seconds{source="${source}",script_name="${script_name}"} ${backup_end_time}
+# HELP backup_scheme Backup scheme.
+# TYPE backup_scheme gauge
+backup_scheme{source="${source}",script_name="${script_name}",backup_type="local"} ${local_days}
+backup_scheme{source="${source}",script_name="${script_name}",backup_type="daily"} ${remote_backups_daily:-0}
+backup_scheme{source="${source}",script_name="${script_name}",backup_type="weekly"} ${remote_backups_weekly:-0}
+backup_scheme{source="${source}",script_name="${script_name}",backup_type="monthly"} ${remote_backups_monthly:-0}
+# HELP backup_size_bytes Last backup size in bytes.
+# TYPE backup_size_bytes gauge
+backup_size_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${pushgateway_last_backup_size:-0}
+# HELP backup_files_quantity Total quantity of files in the backup.
+# TYPE backup_files_quantity gauge
+backup_files_quantity{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${pushgateway_backup_files_quantity:-0}
+# HELP backup_required_space_bytes Required space in bytes for the backup plus some free space.
+# TYPE backup_required_space_bytes gauge
+backup_required_space_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}",backup_size_percent="${backup_size_percent}",minimum_free_space_percent="${minimum_free_space_percent}",freespace_ratio="${freespace_ratio}"} ${pushgateway_backup_required_space}
+EOF
+}
+    test $? -eq 0 || {
+        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
+        local err=1;
+        return "${err}";
+    }
+}
+
+## choosing compress
+gzip=$(command -v gzip 2>/dev/null); bzcompress=$(command -v bzip2 2>/dev/null)
+test "${core_num:-1}" -gt 2 && { pbzip=$(command -v pbzip2 2>/dev/null) && { archiver_opts=(-p$(( core_num / 2 ))); bzcompress="${pbzip}"; }; }
+archiver_prog="${bzcompress:-${gzip}}"
+test -x "${archiver_prog}" > /dev/null 2>&1 || { show_error "No compress util or ${archiver_prog} has no execution flag."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
+
+case "${archiver_prog##*/}" in
+    'pbzip2' ) compress_ext='bz2' ;;
+    'bzip2'  ) compress_ext='bz2' ;;
+    'gzip'   ) compress_ext='gz' ;;
+esac
+
 function make_flock() {
-    command -v flock > /dev/null 2>&1 || { show_error "No flock installed. You need to install flock first."; exit 1; }
+    command -v flock > /dev/null 2>&1 || { show_error "No flock installed. You need to install flock first."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
     exec 9>> "${lock_file:?}"
     flock -n 9 || {
         show_error "Sorry, ${0##*/} is already running. Please, wait until it's finished:\n"
         command -v pstree > /dev/null 2>&1 && pstree -Alpacu "$(cat "${lock_file}")"
         command -v pstree > /dev/null 2>&1 || { pid=$(cat "${lock_file}"); ps f "${pid}" -"${pid}"; }
+        pushgateway_send_result "${glbl_err:?}"
         exit 1
     }
     echo ${$} > "${lock_file}"
@@ -229,12 +315,11 @@ function detect_type() {
     }
 
     test "${#backup_type[*]}" -eq 0 || {
-        test "${!backup_type[*]}" = "${!backup_inc_type[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_inc_type array. Exiting..."; exit 1; }
-        test "${!backup_type[*]}" = "${!backup_count[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_count array. Exiting..."; exit 1; }
-        test "${!backup_type[*]}" = "${!backup_date_pattern[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_date_pattern array. Exiting..."; exit 1; }
-        test "${!backup_type[*]}" = "${!backup_days_multiplier[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_days_multiplier array. Exiting..."; exit 1; }
+        test "${!backup_type[*]}" = "${!backup_inc_type[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_inc_type array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
+        test "${!backup_type[*]}" = "${!backup_count[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_count array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
+        test "${!backup_type[*]}" = "${!backup_date_pattern[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_date_pattern array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
+        test "${!backup_type[*]}" = "${!backup_days_multiplier[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_days_multiplier array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
         for index in "${!backup_type[@]}"; do
-                # shellcheck disable=SC2086
                 test ${backup_date_pattern[$index]} && {
                     type="${backup_type[$index]}"
                     inc_type="${backup_inc_type[$index]}"
@@ -244,9 +329,9 @@ function detect_type() {
         done
    }
 
-   test -z "${type}" && { show_error "An error occurred while detecting backup type, check patterns in backup_date_pattern array!"; exit 1; }
+   test -z "${type}" && { show_error "An error occurred while detecting backup type, check patterns in backup_date_pattern array!"; pushgateway_send_result "${glbl_err:?}"; exit 1; }
    show_notice "Backup type: ${type}, remote backups count: ${remote_backups} (${backup_days} days)."
-   show_notice "Backup increment type: ${inc_type}." #temp
+   show_notice "Backup increment type: ${inc_type}."
 }
 
 function main() {
@@ -255,7 +340,6 @@ function main() {
         test "${no_pushgateway}" -ne 1 && pushgateway_start_backup
         detect_type
         make_flock
-        backup_start_time=$(date +%s)
 
         case "${1}" in
             "--backup"|"-b")
@@ -270,12 +354,9 @@ function main() {
             ;;
         esac
 
-        test "${err:?}" -eq 1 && { show_error "Script ${0##*/} failed. Check logs"; }
+        test "${glbl_err:?}" -eq 1 && { show_error "Script ${0##*/} failed. Please, check logs."; }
         show_notice "Backup script completed."
-        test "${no_pushgateway}" -ne 1 && {
-            backup_end_time=$(date +%s)
-            pushgateway_send_result "${err}"
-        }
+        pushgateway_send_result "${glbl_err}"
     } >> "${log_file}" 2>> >(tee -a "${log_file}" | grep -vE "${stderr_exclude:?}" >&2)
 }
 
@@ -353,9 +434,10 @@ function mysql_dump_all() {
     for current_db in $(mysql "${mysql_opts[@]}" -B -N -e "show databases;" | grep -vE "^(${mysql_ignore_databases})$"); do
         {
             show_notice "Dumping database ${current_db}" "${FUNCNAME}"
-            mysqldump "${mysql_opts[@]}" "${mysql_dump_opts[@]}" "${current_db}" -r "${dir}/${current_db}".sql && \
-            nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${current_db}".sql
+            mysqldump "${mysql_opts[@]}" "${mysql_dump_opts[@]}" "${current_db}" -r "${dir}/${current_db}.sql" && \
+            nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${current_db}.sql"
         } || { show_error "Error on dumping database ${current_db}" "${FUNCNAME}"; local err=1; }
+        backup_size_and_files_count "${dir}/${current_db}.sql"* || local err=1;
     done
     return "${err}"
 }
@@ -367,10 +449,11 @@ function mysql_dump_db() {
     test -d "${dir}" || mkdir -p "${dir}"
     show_notice "Dumping database ${db}" "${FUNCNAME}"
     {
-        mysqldump "${mysqlopts[@]}" "${mysql_dump_opts[@]}" "${db}" "${db_tables[@]}" -r "${dir}/${db}${prefix}".sql && \
-        { test "${no_compress}" -ne 1 && { nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${db}${prefix}".sql || local err=1; } || true; } || local err=1
+        mysqldump "${mysqlopts[@]}" "${mysql_dump_opts[@]}" "${db}" "${db_tables[@]}" -r "${dir}/${db}${prefix}.sql" && \
+        { test "${no_compress}" -ne 1 && { nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${db}${prefix}.sql" || local err=1; } || true; } || local err=1
         test "${err}" -eq 0 && true || false
     } || show_error "Error on dumping database ${db}" "${FUNCNAME}"
+    backup_size_and_files_count "${dir}/${db}${prefix}.sql"* || local err=1;
     return "${err}"
 }
 
@@ -385,11 +468,14 @@ function mysql_dump_all_tables() {
         for db_table in "${db_tables_list[@]}"; do
             show_notice "Dumping table ${db_table}"
             test -d "${dir}/${current_db}" || mkdir -p "${dir}/${current_db}"
-            mysqldump "${mysqlopts[@]}" "${mysql_dump_opts[@]}" "${current_db}" "${db_table}" -r "${dir}/${current_db}/${db_table}".sql || \
+            mysqldump "${mysqlopts[@]}" "${mysql_dump_opts[@]}" "${current_db}" "${db_table}" -r "${dir}/${current_db}/${db_table}.sql" || \
                 { show_error "Error on dumping table ${current_db}.${db_table}" "${FUNCNAME}"; local err=1; }
         done
         show_notice "Compressing tables..."
         nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${current_db}"/*.sql
+        for file in "${dir}/${current_db}"/*.sql*; do
+            backup_size_and_files_count "${file}" || local err=1;
+        done
     done
     return "${err}"
 }
@@ -403,11 +489,13 @@ function mysql_dump_db_tables() {
     for db_table in "${db_tables[@]}"; do
         show_notice "Dumping table ${db_table}"
         test -d "${dir}/${db}${prefix}" || mkdir -p "${dir}/${db}${prefix}"
-        mysqldump "${mysqlopts[@]}" "${mysql_dump_opts[@]}" "${db}" "${db_table}" -r "${dir}/${db}${prefix}/${db_table}${prefix}".sql || \
+        mysqldump "${mysqlopts[@]}" "${mysql_dump_opts[@]}" "${db}" "${db_table}" -r "${dir}/${db}${prefix}/${db_table}${prefix}.sql" || \
             { show_error "Error on dumping table ${db_table}" "${FUNCNAME}"; local err=1; }
     done
-    test "${no_compress}" -ne 1 && { nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${db}${prefix}"/*"${prefix}".sql || local err=1; } || true
-
+    test "${no_compress}" -ne 1 && { nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${db}${prefix}"/*"${prefix}.sql" || local err=1; } || true
+    for file in "${dir}/${db}${prefix}"/*"${prefix}.sql"*; do
+        backup_size_and_files_count "${file}" || local err=1;
+    done
     test "${err}" -eq 0 && true || false
     return "${err}"
 }
@@ -426,6 +514,7 @@ function mysql_xtra_backup_db() {
         nice -n 19 ionice -c 3 tar -cP "${tar_opts[@]}" "${dir}/${db}" | "${archiver_prog}" "${archiver_opts[@]}" > "${dir}/${db}.tar.${compress_ext}" && \
         test -d "${dir}/${db}" && rm -rf "${dir:?}/${db}"
     } || { show_error "Error on dumping database ${db}" "${FUNCNAME}"; local err=1; }
+    backup_size_and_files_count "${dir}/${db}.tar.${compress_ext}" || local err=1;
     return "${err}"
 }
 
@@ -444,6 +533,7 @@ function mysql_xtra_backup_all() {
         nice -n 19 ionice -c 3 tar -cP "${tar_opts[@]}" "${dir}/alldb" | "${archiver_prog}" "${archiver_opts[@]}" > "$dir/alldb.tar.${compress_ext}" && \
         test -d "${dir}/alldb" && rm -rf "${dir:?}/alldb"
     } || { show_error "Error on making full dump" "${FUNCNAME[0]}"; local err=1; }
+    backup_size_and_files_count "$dir/alldb.tar.${compress_ext}" || local err=1;
     return "${err}"
 }
 
@@ -458,12 +548,13 @@ function sqlite_dump_db() {
         { test "${no_compress}" -ne 1 && { nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${dump_name}.sql" || local err=1; } || true; } || local err=1
         test "${err}" -eq 0 && true || false
     } || show_error "Error on dumping database ${db_path}" "${FUNCNAME}"
+    backup_size_and_files_count "${dir}/${dump_name}.sql"* || local err=1;
     return "${err}"
 }
 
 function mongo_dump_all() {
     local err=0; local dir="${1}"
-    command -v mongodump > /dev/null || { show_error "No mongodump installed." "${FUNCNAME}"; exit 1;}
+    command -v mongodump > /dev/null || { show_error "No mongodump installed." "${FUNCNAME}"; return 1;}
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     for current_db in $(echo 'show dbs' | mongo "${mongo_opts[@]}" --quiet | awk '{print $1}' | grep -vE "^(${mongo_ignore_databases})$"); do
@@ -472,6 +563,7 @@ function mongo_dump_all() {
             test "${no_compress}" -ne 0 && nice -n 19 ionice -c 3 mongodump "${mongo_opts[@]}" --quiet -d "${current_db}" --archive="${dir}/${current_db}.dump"
             test "${no_compress}" -eq 0 && nice -n 19 ionice -c 3 mongodump "${mongo_opts[@]}" --quiet -d "${current_db}" --archive | \
             "${archiver_prog}" "${archiver_opts[@]}" > "${dir}/${current_db}.${compress_ext}"
+            backup_size_and_files_count "${dir}/${current_db}"* || local err=1;
         } || { show_error "Error on dumping database ${current_db}" "${FUNCNAME}"; local err=1; }
     done
     return "${err}"
@@ -479,7 +571,7 @@ function mongo_dump_all() {
 
 function mongo_dump_all_old() {
     local err=0; local dir="${1}"
-    command -v mongodump > /dev/null || { show_error "No mongodump installed." "${FUNCNAME}"; exit 1;}
+    command -v mongodump > /dev/null || { show_error "No mongodump installed." "${FUNCNAME}"; return 1;}
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     for current_db in $(echo 'show dbs' | mongo "${mongo_opts[@]}" --quiet | awk '{print $1}' | grep -vE "^(${mongo_ignore_databases})$"); do
@@ -488,6 +580,7 @@ function mongo_dump_all_old() {
             nice -n 19 ionice -c 3 mongodump "${mongo_opts[@]}" --quiet -d "${current_db}" -o "${dir}/${current_db}" && \
             nice -n 19 ionice -c 3 tar -C "${dir}" -c "${current_db}" | "${archiver_prog}" "${archiver_opts[@]}" > "${dir}/${current_db}.tar.${compress_ext}" && \
             test -d "${dir}/${current_db}" && rm -rf "${dir:?}/${current_db}"
+            backup_size_and_files_count "${dir}/${current_db}"* || local err=1;
         } || { show_error "Error on dumping database ${current_db}" "${FUNCNAME}"; local err=1; }
     done
     return "${err}"
@@ -501,6 +594,7 @@ function compress_dir() {
     show_notice "Compress ${source} to ${target}" "${FUNCNAME}"
     nice -n 19 ionice -c 3 tar -cC / "${tar_opts[@]}" "${tar_exclude[@]}" "${source}" | "${archiver_prog}" "${archiver_opts[@]}" > "${target}" || \
     { show_error "Error on: tar -cC / ${tar_opts[*]} ${tar_exclude[*]} ${source} | ${archiver_prog} ${archiver_opts[*]} > ${target} ${FUNCNAME}"; local err=1; }
+    backup_size_and_files_count "${target}" || local err=1;
     return "${err}"
 }
 
@@ -516,6 +610,7 @@ function inc_compress_dir() {
     show_notice "Making ${suffix} archive from ${source} to ${target%%.*}.${suffix}.tar.${compress_ext}" "${FUNCNAME}"
     nice -n 19 ionice -c 3 tar -cg "${snap_file}" "${inc_tar_opts[@]}" "${inc_tar_exclude[@]}" -C "${source}" . | "${archiver_prog}" "${archiver_opts[@]}" > "${target%%.*}.${suffix}.tar.${compress_ext}" || \
     { show_error "Error on: tar -cg ${snap_file} ${inc_tar_opts[*]} ${inc_tar_exclude[*]} -C ${source} . | ${archiver_prog} ${archiver_opts[*]} > ${target%%.*}.${suffix}.tar.${compress_ext}" "${FUNCNAME}"; local err=1; }
+    backup_size_and_files_count "${target}" || local err=1;
     return "${err}";
 }
 
@@ -567,15 +662,17 @@ function pg_dump_all() {
     for current_db in $(psql "${psql_opts[@]}" -c 'SELECT datname from pg_database' | grep -vE ${pg_ignore_databases}); do
         {
             show_notice "Dumping database ${current_db}" "${FUNCNAME}"
-            pg_dump "${pg_dump_opts[@]}" -Fc "${current_db}" > "${dir}/${current_db}.pgdmp" || err=1
-            test "${no_compress}" -ne 1 && { nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${current_db}.pgdmp" || err=1; }
+            pg_dump "${pg_dump_opts[@]}" -Fc "${current_db}" > "${dir}/${current_db}.pgdmp" || local err=1
+            test "${no_compress}" -ne 1 && { nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${current_db}.pgdmp" || local err=1; }
             test "${err}" -eq 0 && true || false
+            backup_size_and_files_count "${dir}/${current_db}"* || local err=1;
         } || { show_error "Error on dumping database ${current_db}" "${FUNCNAME}"; local err=1; }
     done
     show_notice "Dumping global objects" "${FUNCNAME}"
     pg_dumpall "${pg_dump_opts[@]}" --globals-only > "${dir}/globals.sql" && \
     nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/globals.sql" || \
     { show_error "Error on dumping global objects" "${FUNCNAME}"; local err=1; }
+    backup_size_and_files_count "${dir}/globals.sql"* || local err=1;
     test "${pg_peplica_pause}" -ne 0 && { pg_repl_ctl resume || local err=1; }
     return "${err}"
 }
@@ -588,9 +685,10 @@ function pg_dump_db() {
     show_notice "Dumping database ${db}" "${FUNCNAME}"
     {
         test "${pg_peplica_pause}" -ne 0 && { pg_repl_ctl pause || local err=1; }
-        pg_dump "${pg_dump_opts[@]}" -Fc "${db}" > "${dir}/${db}${prefix}.pgdmp" || err=1
-        test "${no_compress}" -ne 1 && { nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${db}${prefix}.pgdmp" || err=1; }
+        pg_dump "${pg_dump_opts[@]}" -Fc "${db}" > "${dir}/${db}${prefix}.pgdmp" || local err=1
+        test "${no_compress}" -ne 1 && { nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${db}${prefix}.pgdmp" || local err=1; }
         test "${err}" -eq 0 && true || false
+        backup_size_and_files_count "${dir}/${db}${prefix}"* || local err=1;
     } || { show_error "Error on dumping database ${db}" "${FUNCNAME}"; local err=1; }
     test "${pg_peplica_pause}" -ne 0 && { pg_repl_ctl resume || local err=1; }
     return "${err}"
@@ -613,6 +711,7 @@ function redis_rdb_backup() {
             cp "${redis_rdp_location}" "${dir}/${current_date}-redis.rdb" && \
             nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${current_date}-redis.rdb" || \
             { show_error "Error on copy and compress ${redis_rdp_location}" "${FUNCNAME}"; local err=1; }
+            backup_size_and_files_count "${dir}/${current_date}-redis.rdb"* || local err=1;
             return "${err}"
         }
     done
@@ -636,7 +735,7 @@ function rclone_sync() {
         for code in "${rclone_ignore_codes[@]}"; do
             test "${code}" -eq "${rclone_error}" && { ignore_error=1; break; }
         done
-        test "${ignore_error}" -eq 0 && show_error "Error on rclone_sync ${source} to ${target} with code ${rclone_error}" "${FUNCNAME[0]}";
+        test "${ignore_error}" -eq 0 && show_error "Error on rclone_sync ${source} to ${target} with code ${rclone_error}" "${FUNCNAME[0]}"; local err=1
     }
     return "${err}"
 }
@@ -646,6 +745,7 @@ function rclone_purge() {
     command -v rclone > /dev/null 2>&1 || { show_error "Install rclone first!" "${FUNCNAME}"; return 1; }
     test -f "${rclone_conf}" || { show_error "Couldn't find rclone configuration file (${rclone_conf}), you need to configure rclone or set alternative path to config by rclone_alternative_conf variable." "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
+    rclone -q lsd "${target}"> /dev/null 2>&1 || { show_error "Smth went wrong while listing storage."; local err=1; }
     total=$(rclone -q lsd "${target}" | wc -l)
     to_delete=$((total - count))
     test "${to_delete}" -gt 0 && {
@@ -716,7 +816,7 @@ function ftp_clean_dir() {
     test "${to_delete}" -gt 0 && {
             for var in $(lftp -e "cls -1 --sort=name ${target}; exit" -u ${ftp_user},${ftp_pass} ${ftp_host} | grep -E '20[0-9][0-9][0-1][0-9][0-9][0-9]' | head -n ${to_delete}); do
                     show_notice "Deleting ${var}" "${FUNCNAME}"
-                    lftp -e "rm -r ${var}; exit" -u ${ftp_user},${ftp_pass} ${ftp_host} || { show_error "Somthing wrong on delete ftp://${ftp_host}${target}" "${FUNCNAME}"; err=1; }
+                    lftp -e "rm -r ${var}; exit" -u ${ftp_user},${ftp_pass} ${ftp_host} || { show_error "Somthing wrong on delete ftp://${ftp_host}${target}" "${FUNCNAME}"; local err=1; }
             done
     } || show_notice "Nothing to delete from ftp://${ftp_host}${target}" "${FUNCNAME}"
     return "${err}"
@@ -728,7 +828,7 @@ function rdiff_backup() {
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dst}" || mkdir -p "${dst}"
     show_notice "Making rdiff backup" "${FUNCNAME}"
-    nice -n 19 ionice -c 3 rdiff-backup "${rdiff_opts[@]}" "${rdiff_excludes[@]}" "${src}" "${dst}" || err=1
+    nice -n 19 ionice -c 3 rdiff-backup "${rdiff_opts[@]}" "${rdiff_excludes[@]}" "${src}" "${dst}" || local err=1
     return "${err}"
 }
 
@@ -743,7 +843,7 @@ function rdiff_clean_by_quantity() {
         test "${to_delete}" -gt 1 && {
                     bck_date=$(rdiff-backup --list-increments "${target}" | grep -oE '20[0-9][0-9]-[0-1][0-9]-[0-9][0-9]' | head -n ${to_delete} | tail -1)
                     show_notice "Deleting backups older than ${bck_date}" "${FUNCNAME}"
-                    rdiff-backup --remove-older-than "${bck_date}" --force --print-statistics "${target}" || { show_error "Something went wrong on deleting copies older than ${bck_date}." "${FUNCNAME}"; err=1; }
+                    rdiff-backup --remove-older-than "${bck_date}" --force --print-statistics "${target}" || { show_error "Something went wrong on deleting copies older than ${bck_date}." "${FUNCNAME}"; local err=1; }
         } || show_notice "Nothing to delete." "${FUNCNAME}"
     return "${err}"
 }
@@ -756,8 +856,10 @@ function elastic_backup() {
     show_notice "Creating snapshots in repository \"${elastic_repo}\"" "${FUNCNAME}"
     for indice in $(curl -XGET "${elastic_url}/_cat/indices" 2>/dev/null | awk '{print $3}'); do
         show_notice "Creating snapshot_${indice}_${current_date}" "${FUNCNAME}"
-        curl -s -XPUT "${elastic_url}/_snapshot/${elastic_repo}/snapshot_${indice}_${current_date}?wait_for_completion=true" -d '{"indices":"'"${indice}"'"}' | grep -q 'SUCCESS' || \
+        curl -s -XPUT "${elastic_url}/_snapshot/${elastic_repo}/snapshot_${indice}_${current_date}?wait_for_completion=true" -d '{"indices":"'"${indice}"'"}' | grep -q 'SUCCESS' || {
             show_error "Smth went wrong while creating \"snapshot_${indice}_${current_date}\", manual check needed. Maybe, you tried to make backup second time on the same day?" "${FUNCNAME}"
+            local err=1
+        }
     done
     return "${err}"
 }
@@ -774,8 +876,10 @@ function elastic_clean() {
         snapshot_lifetime=$((current_timestamp-snapshot_timestamp))
         test "${snapshot_lifelimit}" -le "${snapshot_lifetime}" && {
             show_notice "Deleting ${snapshot}" "${FUNCNAME}"
-            curl -s -XDELETE "${elastic_url}/_snapshot/${elastic_repo}/${snapshot}?pretty" | grep -q 'true' || \
+            curl -s -XDELETE "${elastic_url}/_snapshot/${elastic_repo}/${snapshot}?pretty" | grep -q 'true' || {
                 show_error "Smth went wrong while deleting \"${snapshot}\" from repository \"${elastic_repo}\", manual check needed." "${FUNCNAME}"
+                local err=1
+            }
         }
     done
     return "${err}"
@@ -790,7 +894,7 @@ function clickhouse_dump_all() {
     test -z "${ch_pass}" && ch_credentials=(--host="${ch_host}" --port="${ch_port}" --user="${ch_user}")
     test -d "${dir}" || mkdir -p "${dir}"
     local db_list=($(clickhouse-client "${ch_credentials[@]}" "${ch_opts[@]}" --query="SHOW DATABASES"))
-    test -z "${db_list[0]}" && { show_notice "No clickhouse databases found!" "${FUNCNAME}"; return "${err}"; }
+    test -z "${db_list[0]}" && { show_notice "No clickhouse databases found!" "${FUNCNAME}"; return 1; }
     for current_db in "${db_list[@]}"; do
         test "${current_db}" == "system" && continue
         show_notice "Getting list of tables in database \"${current_db}\"" "${FUNCNAME}"
@@ -799,22 +903,27 @@ function clickhouse_dump_all() {
         for current_table in "${table_list[@]}"; do
             [[ "${current_table}" == ".inner."* ]] && continue
             show_notice "Dumping table \"${current_table}\"" "${FUNCNAME}"
-            clickhouse-client "${ch_credentials[@]}" "${ch_opts[@]}" --query="SHOW CREATE TABLE ${current_db}.${current_table}" > "${dir}/${current_db}.${current_table}.sql" && \
-                nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${current_db}.${current_table}.sql"
-            clickhouse-client "${ch_credentials[@]}" "${ch_opts[@]}" --query="SELECT * FROM ${current_db}.${current_table} FORMAT CSVWithNames" > "${dir}/${current_db}.${current_table}.csv" && \
-                nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${current_db}.${current_table}.csv"
+            { clickhouse-client "${ch_credentials[@]}" "${ch_opts[@]}" --query="SHOW CREATE TABLE ${current_db}.${current_table}" > "${dir}/${current_db}.${current_table}.sql" && \
+                nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${current_db}.${current_table}.sql"; } || {
+                    show_error "Smth went wrong while running SHOW CREATE TABLE ${current_db}.${current_table}"; local err=1; }
+            { clickhouse-client "${ch_credentials[@]}" "${ch_opts[@]}" --query="SELECT * FROM ${current_db}.${current_table} FORMAT CSVWithNames" > "${dir}/${current_db}.${current_table}.csv" && \
+                nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/${current_db}.${current_table}.csv"; } || {
+                    show_error "Smth went wrong while running SELECT * FROM ${current_db}.${current_table} FORMAT CSVWithNames"; local err=1; }
+            backup_size_and_files_count "${dir}/${current_db}.${current_table}.sql"* || local err=1;
+            backup_size_and_files_count "${dir}/${current_db}.${current_table}.csv"* || local err=1;
         done
     done
     return "${err}";
 }
 
 function consul_backup() {
-    local err=0; local dir="${1}"
+    local dir="${1}"
     command -v consul > /dev/null || { show_error "Not found consul." "${FUNCNAME}"; return 1;}
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     show_notice "Start saving consul shapshot into the ${dir}..."
     consul snapshot save "${consul_opts[@]}" "${dir}/consul.snap" || { show_error "An error has occurred while saving the snapshot." "${FUNCNAME}"; return 1;}
+    backup_size_and_files_count "${dir}/consul.snap" || local err=1;
     show_notice "Process has been completed successfully."
 }
 
@@ -840,6 +949,7 @@ function mysql_lxc_hotcopy_all() {
             "${mysql_hotcopy_ssh_cmd[@]}" "mysqlhotcopy ${mysql_hotcopy_opts[*]} ${current_db} ${tmpdir}" && \
             nice -n 19 ionice -c 3 tar -cP "${tar_opts[@]}" "${tmpdir}/${current_db}" | "${archiver_prog}" "${archiver_opts[@]}" > "${dir}/${current_db}.tar.${compress_ext:?}" && \
             test -d "${tmpdir}/${current_db}" && rm -rf "${tmpdir:?}/${current_db}"
+            backup_size_and_files_count "${dir}/${current_db}.tar.${compress_ext:?}" || local err=1;
         } || { show_error "An error has occurred when creating backup of database ${current_db}" "${FUNCNAME}"; local err=1; }
     done
     return "${err}"
@@ -859,82 +969,13 @@ function rabbitmq_backup() {
     show_notice "Exporting RabbitMQ and making an archive of mnesia directory..." "${FUNCNAME}"
     rabbitmqadmin export "${rabbitmqadmin_opts[@]}" "${dir}/rabbitmq_configuration.json" || {
         show_error "An error occurred while exporting RabbitMQ!" "${FUNCNAME}"
+        backup_size_and_files_count "${dir}/rabbitmq_configuration.json" || local err=1;
         local err=1
     }
     compress_dir "${rabbitmq_datadir}" "${dir}/rabbitmq_data.tar.${compress_ext}" || {
         show_error "An error occurred while archiving ${rabbitmq_datadir}!" "${FUNCNAME}"
+        backup_size_and_files_count "${dir}/rabbitmq_data.tar.${compress_ext}" || local err=1;
         local err=1
     }
     return "${err}"
-}
-
-function pushgateway_start_backup() {
-    local err=0; hostname=$(hostname); script_name=${0##*/}; backup_is_running=1
-    cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
-# HELP backup_is_running Сurrent state of the backup script (1 = running, 0 = exited)
-# TYPE backup_is_running gauge
-backup_is_running{script_name="${script_name}",hostname="${hostname}"} ${backup_is_running}
-EOF
-    test $? -eq 0 || {
-        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
-        err=1;
-        return "${err}";
-    }
-}
-
-function pushgateway_prepare_vars() {
-    source=$(hostname); script_name=${0##*/}; backup_is_running=0
-    test -d "${backup_dir}/${current_date}" && {
-        pushgateway_backup_files_quantity=$(find "${backup_dir}/${current_date}" -type f | wc -l)
-        pushgateway_last_backup_size=$(du -sb "${backup_dir}/${current_date}" | awk '{print $1}')
-        pushgateway_backup_required_space=$((pushgateway_last_backup_size+pushgateway_last_backup_size*backup_size_percent/100))
-    }
-    pushgateway_backup_duration=$((backup_end_time-backup_start_time))
-}
-
-function pushgateway_send_result() {
-    local err=0; local backup_err_code="${1}"
-
-    pushgateway_prepare_vars
-    cat <<EOF | "${curl}" -sq "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
-# HELP backup_script_info Information about script and library.
-# TYPE backup_script_info gauge
-backup_script_info{source="${source}",script_name="${script_name}",cbver="${cbver}",bfver="${bfver}"} 1
-# HELP backup_is_running Сurrent state of the backup script (1 = running, 0 = exited)
-# TYPE backup_is_running gauge
-backup_is_running{source="${source}",script_name="${script_name}"} ${backup_is_running}
-# HELP backup_failure Script exit status (1 = error, 0 = success)
-# TYPE backup_failure gauge
-backup_script_failure{source="${source}",script_name="${script_name}"} ${backup_err_code}
-# HELP backup_duration_seconds Script execution time, in seconds.
-# TYPE backup_duration_seconds gauge
-backup_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_duration}
-# HELP backup_start_time_seconds Unix timestamp of the backup script execution start.
-# TYPE backup_start_time_seconds counter
-backup_start_time_seconds{source="${source}",script_name="${script_name}"} ${backup_start_time}
-# HELP backup_end_time_seconds Unix timestamp of the backup script execution end.
-# TYPE backup_end_time_seconds counter
-backup_end_time_seconds{source="${source}",script_name="${script_name}"} ${backup_end_time}
-# HELP backup_scheme Backup scheme.
-# TYPE backup_scheme gauge
-backup_scheme{source="${source}",script_name="${script_name}",backup_type="local"} ${local_days}
-backup_scheme{source="${source}",script_name="${script_name}",backup_type="daily"} ${remote_backups_daily}
-backup_scheme{source="${source}",script_name="${script_name}",backup_type="weekly"} ${remote_backups_weekly}
-backup_scheme{source="${source}",script_name="${script_name}",backup_type="monthly"} ${remote_backups_monthly}
-# HELP backup_size_bytes Last backup size in bytes.
-# TYPE backup_size_bytes gauge
-backup_size_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${pushgateway_last_backup_size}
-# HELP backup_files_quantity Total quantity of files in the backup.
-# TYPE backup_files_quantity gauge
-backup_files_quantity{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${pushgateway_backup_files_quantity}
-# HELP backup_required_space_bytes Required space in bytes for the backup plus some free space.
-# TYPE backup_required_space_bytes gauge
-backup_required_space_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}",backup_size_percent="${backup_size_percent}",minimum_free_space_percent="${minimum_free_space_percent}",freespace_ratio="${freespace_ratio}"} ${pushgateway_backup_required_space}
-EOF
-
-    test $? -eq 0 || {
-        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
-        err=1;
-        return "${err}";
-    }
 }

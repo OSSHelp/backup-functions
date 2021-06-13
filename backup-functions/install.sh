@@ -5,8 +5,8 @@ umask 0077
 export LANG=C
 export LC_ALL=C
 
-bfver=3.22
-cbver=1.02
+bfver=3.26.0
+cbver=1.02.0
 
 index_url="${REMOTE_URI:-https://oss.help/scripts/backup/backup-functions/.list}"
 list_name=$(basename "${index_url}")

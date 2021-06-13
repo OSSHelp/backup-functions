@@ -1,5 +1,30 @@
 # Changelog
 
+## v3.26.0
+
+* Added function for counting files size and quantity.
+
+## v3.25
+
+* Fixed format parsing error (Pushgateway).
+
+## v3.24
+
+* Updated Pushgateway URL (resolved conflicts between scripts with the same name in difrent containers on the server).
+
+## v3.23
+
+* Updated Pushgateway function
+* Fixed error handling
+
+## v3.22
+
+* Adjusted metrics generation for pushgateway.
+
+## v3.21
+
+* Renamed script_failure to backup_script_failure for consistency.
+
 ## v3.20
 
 * Updated Pushgateway function

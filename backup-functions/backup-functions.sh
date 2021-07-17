@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.26.0
+bfver=3.26.1
 
 ## default variables
 myhostname=$(hostname -f)
@@ -856,7 +856,7 @@ function elastic_backup() {
     show_notice "Creating snapshots in repository \"${elastic_repo}\"" "${FUNCNAME}"
     for indice in $(curl -XGET "${elastic_url}/_cat/indices" 2>/dev/null | awk '{print $3}'); do
         show_notice "Creating snapshot_${indice}_${current_date}" "${FUNCNAME}"
-        curl -s -XPUT "${elastic_url}/_snapshot/${elastic_repo}/snapshot_${indice}_${current_date}?wait_for_completion=true" -d '{"indices":"'"${indice}"'"}' | grep -q 'SUCCESS' || {
+        curl -s -H 'Content-Type: application/json' -XPUT "${elastic_url}/_snapshot/${elastic_repo}/snapshot_${indice}_${current_date}?wait_for_completion=true" -d '{"indices":"'"${indice}"'"}' | grep -q 'SUCCESS' || {
             show_error "Smth went wrong while creating \"snapshot_${indice}_${current_date}\", manual check needed. Maybe, you tried to make backup second time on the same day?" "${FUNCNAME}"
             local err=1
         }
@@ -876,7 +876,7 @@ function elastic_clean() {
         snapshot_lifetime=$((current_timestamp-snapshot_timestamp))
         test "${snapshot_lifelimit}" -le "${snapshot_lifetime}" && {
             show_notice "Deleting ${snapshot}" "${FUNCNAME}"
-            curl -s -XDELETE "${elastic_url}/_snapshot/${elastic_repo}/${snapshot}?pretty" | grep -q 'true' || {
+            curl -s -H 'Content-Type: application/json' -XDELETE "${elastic_url}/_snapshot/${elastic_repo}/${snapshot}?pretty" | grep -q 'true' || {
                 show_error "Smth went wrong while deleting \"${snapshot}\" from repository \"${elastic_repo}\", manual check needed." "${FUNCNAME}"
                 local err=1
             }

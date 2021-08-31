@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.26.1
+bfver=3.27.0
 
 ## default variables
 myhostname=$(hostname -f)
@@ -26,7 +26,6 @@ test -x "${nproc}" && core_num=$("${nproc}" 2>/dev/null)
 pushgateway_url="http://netdata-master:9091/metrics/job/${0##*/}/source/${myhostname%.*}"
 pushgateway_opts=()
 no_pushgateway=0
-backup_start_time=$(date +%s)
 
 ## scheme vars
 local_days=0
@@ -185,12 +184,68 @@ function show_notice() {
     echo -e "[NOTICE.${funcname} ${log_date}] ${message}"
 }
 
-function pushgateway_start_backup() {
-    local err=0; hostname=$(hostname); script_name=${0##*/}; backup_is_running=1
+function pushgateway_send_start_script() {
+    local err=0; hostname=$(hostname); script_name=${0##*/}; script_start_time=$(date +%s); backup_is_running=1
     cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
-# HELP backup_is_running Сurrent state of the backup script (1 = running, 0 = exited)
+# HELP backup_is_running Сurrent state of the backup creating (1 = running, 0 = exited)
 # TYPE backup_is_running gauge
 backup_is_running{script_name="${script_name}",hostname="${hostname}"} ${backup_is_running}
+EOF
+    test $? -eq 0 || {
+        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
+        local err=1;
+        return "${err}";
+    }
+}
+
+function pushgateway_send_backup_start() {
+    local err=0; hostname=$(hostname); script_name=${0##*/}; backup_start_time=$(date +%s); backup_is_running=1
+    cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
+# HELP backup_is_executing Сurrent state of the backup executing (1 = running, 0 = exited)
+# TYPE backup_is_executing gauge
+backup_is_executing{script_name="${script_name}",hostname="${hostname}"} ${backup_is_executing}
+EOF
+    test $? -eq 0 || {
+        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
+        local err=1;
+        return "${err}";
+    }
+}
+
+function pushgateway_send_backup_end() {
+    local err=0; backup_end_time=$(date +%s); backup_end_time=$(date +%s); backup_is_running=0
+    cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
+# HELP backup_is_executing Сurrent state of the backup executing (1 = running, 0 = exited)
+# TYPE backup_is_executing gauge
+backup_is_executing{script_name="${script_name}",hostname="${hostname}"} ${backup_is_running}
+EOF
+    test $? -eq 0 || {
+        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
+        local err=1;
+        return "${err}";
+    }
+}
+
+function pushgateway_send_upload_start() {
+    local err=0; hostname=$(hostname); script_name=${0##*/}; upload_start_time=$(date +%s); upload_is_executing=1
+    cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
+# HELP upload_is_executing Сurrent state of the backup executing (1 = running, 0 = exited)
+# TYPE upload_is_executing gauge
+upload_is_executing{script_name="${script_name}",hostname="${hostname}"} ${upload_is_executing}
+EOF
+    test $? -eq 0 || {
+        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
+        local err=1;
+        return "${err}";
+    }
+}
+
+function pushgateway_send_upload_end() {
+    local err=0; hostname=$(hostname); script_name=${0##*/}; upload_end_time=$(date +%s); upload_is_executing=0
+    cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
+# HELP upload_is_executing Сurrent state of the backup executing (1 = running, 0 = exited)
+# TYPE upload_is_executing gauge
+upload_is_executing{script_name="${script_name}",hostname="${hostname}"} ${upload_is_executing}
 EOF
     test $? -eq 0 || {
         show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
@@ -212,11 +267,13 @@ function backup_size_and_files_count() {
 
 function pushgateway_prepare_vars() {
     source=$(hostname); script_name=${0##*/}; backup_is_running=0
-    backup_end_time=$(date +%s)
+    script_end_time=$(date +%s)
     pushgateway_last_backup_size="${glbl_backup_size}"
     pushgateway_backup_files_quantity="${glbl_backup_files_cnt}"
     pushgateway_backup_required_space=$((pushgateway_last_backup_size+pushgateway_last_backup_size*backup_size_percent/100))
-    pushgateway_backup_duration=$((backup_end_time-backup_start_time))
+    pushgateway_backup_duration=$((script_end_time-script_start_time))
+    pushgateway_backup_executing_duration=$((backup_end_time-backup_start_time))
+    pushgateway_backup_uploading_duration=$((upload_end_time-upload_start_time))
 }
 
 function pushgateway_send_result() {
@@ -237,6 +294,12 @@ backup_script_failure{source="${source}",script_name="${script_name}"} ${backup_
 # HELP backup_duration_seconds Script execution time, in seconds.
 # TYPE backup_duration_seconds gauge
 backup_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_duration}
+# HELP backup_executing_duration_seconds Backup execution time, in seconds.
+# TYPE backup_executing_duration_seconds gauge
+backup_executing_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_executing_duration}
+# HELP backup_uploading_duration_seconds Backup uploading time, in seconds.
+# TYPE backup_uploading_duration_seconds gauge
+backup_uploading_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_uploading_duration}
 # HELP backup_start_time_seconds Unix timestamp of the backup script execution start.
 # TYPE backup_start_time_seconds counter
 backup_start_time_seconds{source="${source}",script_name="${script_name}"} ${backup_start_time}
@@ -337,20 +400,28 @@ function detect_type() {
 function main() {
     {
         show_notice "Backup script started."
-        test "${no_pushgateway}" -ne 1 && pushgateway_start_backup
+        test "${no_pushgateway}" -ne 1 && pushgateway_send_script_start
         detect_type
         make_flock
 
         case "${1}" in
             "--backup"|"-b")
+                test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_start
                 make_backup
+                test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_end
             ;;
             "--upload"|"-u")
+                test "${no_pushgateway}" -ne 1 && pushgateway_send_upload_start
                 upload_backup
+                test "${no_pushgateway}" -ne 1 && pushgateway_send_upload_end
             ;;
             *)
+                test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_start
                 make_backup
+                test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_end
+                test "${no_pushgateway}" -ne 1 && pushgateway_send_upload_start
                 upload_backup
+                test "${no_pushgateway}" -ne 1 && pushgateway_send_upload_end
             ;;
         esac
 

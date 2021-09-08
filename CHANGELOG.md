@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.28.0
+
+* Added awscli_purge_opts array and profiles usage to aws functions.
+
+## v3.27.0
+
+* Added backup and upload duration metrics.
+
+## v3.26.1
+
+* Adjusted curl calls for elasticsearch functions (missing header).
+
 ## v3.26.0
 
 * Added function for counting files size and quantity.

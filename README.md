@@ -1,6 +1,6 @@
 # backup-functions
 
-[![Build Status](https://drone.osshelp.ru/api/badges/ansible/backup-functions/status.svg)](https://drone.osshelp.ru/ansible/backup-functions)
+[![Build Status](https://drone.osshelp.ru/api/badges/OSSHelp/backup-functions/status.svg)](https://drone.osshelp.ru/OSSHelp/backup-functions)
 
 ## About
 

@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.27.0
+bfver=3.28.0
 
 ## default variables
 myhostname=$(hostname -f)
@@ -129,6 +129,7 @@ ftp_pass=''
 
 ## awscli arrays
 awscli_sync_opts=()
+awscli_purge_opts=()
 awscli_exclude=()
 
 ## rclone vars & arrays, see https://oss.help/kb917 for ignore_codes.
@@ -829,11 +830,12 @@ function rclone_purge() {
 }
 
 function awscli_sync() {
-    local err=0; local source="${1}"; local target="${2}"
+    local err=0; local source="${1}"; local target="${2}"; local profile="${3}"
     command -v aws > /dev/null 2>&1 || { show_error "Install awscli first!" "${FUNCNAME}"; return 1; }
-    test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
+    test "${#}" -eq 2 || test "${#}" -eq 3 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${source}" || { show_error "Directory ${source} does not exist!" "${FUNCNAME}"; return 1; }
     show_notice "Upload ${source} to ${target}" "${FUNCNAME}"
+    test -n "${profile}" && awscli_sync_opts+=(--profile "${profile}")
     nice -n 19 ionice -c 3 aws s3 sync "${source}" "${target}" "${awscli_sync_opts[@]}" "${awscli_exclude[@]}" || {
         test "${?}" == "1" && { show_error "Error on awscli_sync ${source} to ${target}" "${FUNCNAME}"; local err=1; }
     }
@@ -841,15 +843,16 @@ function awscli_sync() {
 }
 
 function awscli_clean() {
-    local err=0; local target="${1}"; local count="${2}"
+    local err=0; local target="${1}"; local count="${2}"; local profile="${3}"
     command -v aws > /dev/null 2>&1 || { show_error "Install awscli first!" "${FUNCNAME}"; return 1; }
-    test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
-    total=$(aws s3 ls "${target}"/ | grep -cE '20[0-9][0-9][0-1][0-9][0-9][0-9]')
+    test "${#}" -eq 2 || test "${#}" -eq 3 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
+    test -n "${profile}" && awscli_purge_opts+=(--profile "${profile}")
+    total=$(aws s3 ls "${target}"/ "${awscli_purge_opts[@]}" | grep -cE '20[0-9][0-9][0-1][0-9][0-9][0-9]')
     to_delete=$((total - count))
     test "${to_delete}" -gt 0 && {
-    for var in $(aws s3 ls "${target}"/ | grep -E '20[0-9][0-9][0-1][0-9][0-9][0-9]' | sort | head -n "${to_delete}" | awk '{print $2}' | cut -d / -f 1); do
+    for var in $(aws s3 ls "${target}"/ "${awscli_purge_opts[@]}" | grep -E '20[0-9][0-9][0-1][0-9][0-9][0-9]' | sort | head -n "${to_delete}" | awk '{print $2}' | cut -d / -f 1); do
         show_notice "Deleting ${var}" "${FUNCNAME}"
-        aws --recursive s3 rm "${target}/${var}" 2>&1 || { show_error "Error on awscli remove ${var}" "${FUNCNAME}"; local err=1; }
+        aws --recursive s3 rm "${target}/${var}" "${awscli_purge_opts[@]}" 2>&1 || { show_error "Error on awscli remove ${var}" "${FUNCNAME}"; local err=1; }
     done
     } || show_notice "Nothing to delete." "${FUNCNAME}"
     return "${err}"

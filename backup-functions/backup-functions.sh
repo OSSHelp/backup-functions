@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.28.0
+bfver=3.29.0
 
 ## default variables
 myhostname=$(hostname -f)
@@ -131,6 +131,11 @@ ftp_pass=''
 awscli_sync_opts=()
 awscli_purge_opts=()
 awscli_exclude=()
+
+## minio client arrays
+minio_mirror_opts=()
+minio_rm_opts=()
+minio_exclude=()
 
 ## rclone vars & arrays, see https://oss.help/kb917 for ignore_codes.
 rclone_alternative_conf=''
@@ -853,6 +858,33 @@ function awscli_clean() {
     for var in $(aws s3 ls "${target}"/ "${awscli_purge_opts[@]}" | grep -E '20[0-9][0-9][0-1][0-9][0-9][0-9]' | sort | head -n "${to_delete}" | awk '{print $2}' | cut -d / -f 1); do
         show_notice "Deleting ${var}" "${FUNCNAME}"
         aws --recursive s3 rm "${target}/${var}" "${awscli_purge_opts[@]}" 2>&1 || { show_error "Error on awscli remove ${var}" "${FUNCNAME}"; local err=1; }
+    done
+    } || show_notice "Nothing to delete." "${FUNCNAME}"
+    return "${err}"
+}
+
+function minio_mirror() {
+    local err=0; local source="${1}"; local target="${2}"
+    command -v minio-client > /dev/null 2>&1 || { show_error "No minio-client binary found, skipping mirroring." "${FUNCNAME}"; return 1; }
+    test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
+    test -d "${source}" || { show_error "Directory ${source} does not exist!" "${FUNCNAME}"; return 1; }
+    show_notice "Mirroring ${source} to ${target}" "${FUNCNAME}"
+    nice -n 19 ionice -c 3 minio-client mirror --quiet --overwrite --remove "${minio_mirror_opts[@]}" "${minio_exclude[@]}" "${source}" "${target}" || {
+        test "${?}" == "1" && { show_error "An error has occur when mirroring ${source} to ${target}" "${FUNCNAME}"; local err=1; }
+    }
+    return "${err}"
+}
+
+function minio_clean() {
+    local err=0; local target="${1}"; local count="${2}"
+    command -v minio-client > /dev/null 2>&1 || { show_error "No minio-client binary found, skipping cleaning." "${FUNCNAME}"; return 1; }
+    test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
+    total=$(minio-client ls "${target}"/  | grep -cE '20[0-9][0-9][0-1][0-9][0-9][0-9]')
+    to_delete=$((total - count))
+    test "${to_delete}" -gt 0 && {
+    for var in $(minio-client ls "${target}"/ | grep -oE '20[0-9][0-9][0-1][0-9][0-9][0-9]' | sort | head -n "${to_delete}"); do
+        show_notice "Deleting ${var}" "${FUNCNAME}"
+        minio-client rm --recursive --force "${minio_rm_opts[@]}" "${target}/${var}" 2>&1 || { show_error "An error has occur when removing ${var}" "${FUNCNAME}"; local err=1; }
     done
     } || show_notice "Nothing to delete." "${FUNCNAME}"
     return "${err}"

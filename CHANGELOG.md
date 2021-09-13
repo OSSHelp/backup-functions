@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.29.0
+
+* Added minio_mirror and minio_clean functions.
+
 ## v3.28.0
 
 * Added awscli_purge_opts array and profiles usage to aws functions.

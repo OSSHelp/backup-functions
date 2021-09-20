@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.29.0
+bfver=3.29.1
 
 ## default variables
 myhostname=$(hostname -f)
@@ -190,7 +190,7 @@ function show_notice() {
     echo -e "[NOTICE.${funcname} ${log_date}] ${message}"
 }
 
-function pushgateway_send_start_script() {
+function pushgateway_send_script_start() {
     local err=0; hostname=$(hostname); script_name=${0##*/}; script_start_time=$(date +%s); backup_is_running=1
     cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
 # HELP backup_is_running Сurrent state of the backup creating (1 = running, 0 = exited)

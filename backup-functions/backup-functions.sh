@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.29.1
+bfver=3.29.2
 
 ## default variables
 myhostname=$(hostname -f)
@@ -205,7 +205,7 @@ EOF
 }
 
 function pushgateway_send_backup_start() {
-    local err=0; hostname=$(hostname); script_name=${0##*/}; backup_start_time=$(date +%s); backup_is_running=1
+    local err=0; hostname=$(hostname); script_name=${0##*/}; backup_start_time=$(date +%s); backup_is_executing=1
     cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
 # HELP backup_is_executing Сurrent state of the backup executing (1 = running, 0 = exited)
 # TYPE backup_is_executing gauge
@@ -219,11 +219,11 @@ EOF
 }
 
 function pushgateway_send_backup_end() {
-    local err=0; backup_end_time=$(date +%s); backup_end_time=$(date +%s); backup_is_running=0
+    local err=0; backup_end_time=$(date +%s); backup_end_time=$(date +%s); backup_is_executing=0
     cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
 # HELP backup_is_executing Сurrent state of the backup executing (1 = running, 0 = exited)
 # TYPE backup_is_executing gauge
-backup_is_executing{script_name="${script_name}",hostname="${hostname}"} ${backup_is_running}
+backup_is_executing{script_name="${script_name}",hostname="${hostname}"} ${backup_is_executing}
 EOF
     test $? -eq 0 || {
         show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";

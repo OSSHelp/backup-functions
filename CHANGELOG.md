@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.29.2
+
+* Fixed variable name (backup_is_executing) in pushgateway_send_backup_start and pushgateway_send_backup_end functions.
+
+## v3.29.1
+
+* Fixed pushgateway_send_script_start function name.
+
 ## v3.29.0
 
 * Added minio_mirror and minio_clean functions.

@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.30.1
+
+Added backup size counting in the remote storage for awscli_sync, minio_mirror and rclone_sync functions.
+
 ## v3.29.2
 
 * Fixed variable name (backup_is_executing) in pushgateway_send_backup_start and pushgateway_send_backup_end functions.

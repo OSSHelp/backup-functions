@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.29.2
+bfver=3.30.1
 
 ## default variables
 myhostname=$(hostname -f)
@@ -43,6 +43,10 @@ clean_dir_regex='20[0-9][0-9][0-1][0-9][0-9][0-9]'
 
 ## enable compressing in mysql_dump_db, mysql_dump_db_tables, mongo_dump_all, sqlite_dump_db, pg_dump_all and pg_dump_db functions by default
 no_compress=0
+
+## enable file counting and backup weight checking in the remote storage (for awscli_sync and rclone_sync only).
+
+no_rmt_bckp_chck=0
 
 ## variables for checking free space
 backup_size_file=/var/backups/${0##*/}.size
@@ -324,6 +328,12 @@ backup_size_bytes{source="${source}",script_name="${script_name}",backup_dir="${
 # HELP backup_files_quantity Total quantity of files in the backup.
 # TYPE backup_files_quantity gauge
 backup_files_quantity{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${pushgateway_backup_files_quantity:-0}
+# HELP remote_backup_size_bytes Last remote backup size in bytes.
+# TYPE remote_backup_size_bytes gauge
+remote_backup_size_bytes{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}"} ${rmt_bckp_size:-0}
+# HELP remote_backup_files_quantity Total quantity of files in the remote backup.
+# TYPE remote_backup_files_quantity gauge
+remote_backup_files_quantity{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}"} ${rmt_bckp_files_count:-0}
 # HELP backup_required_space_bytes Required space in bytes for the backup plus some free space.
 # TYPE backup_required_space_bytes gauge
 backup_required_space_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}",backup_size_percent="${backup_size_percent}",minimum_free_space_percent="${minimum_free_space_percent}",freespace_ratio="${freespace_ratio}"} ${pushgateway_backup_required_space}
@@ -814,6 +824,13 @@ function rclone_sync() {
         done
         test "${ignore_error}" -eq 0 && show_error "Error on rclone_sync ${source} to ${target} with code ${rclone_error}" "${FUNCNAME[0]}"; local err=1
     }
+    test "${no_rmt_bckp_chck}" -eq 0 && {
+        pushgateway_storage_name="${target%:*}"
+        rmt_bckp_values=$(rclone size "${target}")
+        rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total objects:' | grep -oP '\d+')
+        rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep -oP '\(\d+\sBytes\)' | grep -oP '\d+')
+
+    }
     return "${err}"
 }
 
@@ -844,6 +861,13 @@ function awscli_sync() {
     nice -n 19 ionice -c 3 aws s3 sync "${source}" "${target}" "${awscli_sync_opts[@]}" "${awscli_exclude[@]}" || {
         test "${?}" == "1" && { show_error "Error on awscli_sync ${source} to ${target}" "${FUNCNAME}"; local err=1; }
     }
+    test "${no_rmt_bckp_chck}" -eq 0 && {
+        pushgateway_storage_name=$(echo ${target} | awk -F/ '{print$3}')
+        test -n "${profile}" || rmt_bckp_values=$(aws s3 ls --recursive --summarize "${target}" | tail -2)
+        test -n "${profile}" && rmt_bckp_values=$(aws s3 ls --recursive --summarize "${target}" --profile "${profile}" | tail -2)
+        rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total Objects:' | grep -oP '\d+')
+        rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep 'Total Size:' | grep -oP '\d+')
+    }
     return "${err}"
 }
 
@@ -872,6 +896,13 @@ function minio_mirror() {
     nice -n 19 ionice -c 3 minio-client mirror --quiet --overwrite --remove "${minio_mirror_opts[@]}" "${minio_exclude[@]}" "${source}" "${target}" || {
         test "${?}" == "1" && { show_error "An error has occur when mirroring ${source} to ${target}" "${FUNCNAME}"; local err=1; }
     }
+    test "${no_rmt_bckp_chck}" -eq 0 && {
+        command -v jq > /dev/null 2>&1 || { show_error "No jq binary found. Install jq or set no_rmt_bckp_chck=1." "${FUNCNAME}"; return 1; }
+        pushgateway_storage_name="${target%%/*}"
+        minio_json=$(minio-client ls -r --summarize --json "${target}")
+        rmt_bckp_files_count=$(jq '. | select(.totalObjects | length >= 1) | .totalObjects' <<< "${minio_json}")
+        rmt_bckp_size=$(jq '. | select(.totalObjects | length >= 1) | .totalSize' <<< "${minio_json}")
+    }
     return "${err}"
 }
 
@@ -879,10 +910,10 @@ function minio_clean() {
     local err=0; local target="${1}"; local count="${2}"
     command -v minio-client > /dev/null 2>&1 || { show_error "No minio-client binary found, skipping cleaning." "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
-    total=$(minio-client ls "${target}"/  | grep -cE '20[0-9][0-9][0-1][0-9][0-9][0-9]')
+    total=$(minio-client ls "${target}"  | grep -cE '20[0-9][0-9][0-1][0-9][0-9][0-9]')
     to_delete=$((total - count))
     test "${to_delete}" -gt 0 && {
-    for var in $(minio-client ls "${target}"/ | grep -oE '20[0-9][0-9][0-1][0-9][0-9][0-9]' | sort | head -n "${to_delete}"); do
+    for var in $(minio-client ls "${target}" | grep -oE '20[0-9][0-9][0-1][0-9][0-9][0-9]' | sort | head -n "${to_delete}"); do
         show_notice "Deleting ${var}" "${FUNCNAME}"
         minio-client rm --recursive --force "${minio_rm_opts[@]}" "${target}/${var}" 2>&1 || { show_error "An error has occur when removing ${var}" "${FUNCNAME}"; local err=1; }
     done

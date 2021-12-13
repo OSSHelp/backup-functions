@@ -1,8 +1,12 @@
 # Changelog
 
+## v3.30.2
+
+* Fixed issues in the rclone_sync function (new rclone size format output in the version 1.57+).
+
 ## v3.30.1
 
-Added backup size counting in the remote storage for awscli_sync, minio_mirror and rclone_sync functions.
+* Added backup size counting in the remote storage for awscli_sync, minio_mirror and rclone_sync functions.
 
 ## v3.29.2
 

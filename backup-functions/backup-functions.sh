@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.30.1
+bfver=3.30.2
 
 ## default variables
 myhostname=$(hostname -f)
@@ -827,9 +827,8 @@ function rclone_sync() {
     test "${no_rmt_bckp_chck}" -eq 0 && {
         pushgateway_storage_name="${target%:*}"
         rmt_bckp_values=$(rclone size "${target}")
-        rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total objects:' | grep -oP '\d+')
-        rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep -oP '\(\d+\sBytes\)' | grep -oP '\d+')
-
+        rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total objects:' | awk '{print $3}')
+        rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep -oP '\(\d+\sByte.*?\)' | grep -oP '\d+')
     }
     return "${err}"
 }

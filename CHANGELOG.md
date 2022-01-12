@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.30.3
+
+* Fixed issues in the rabbitmq_backup function (files size and quantity counting).
+* Updated global variables for remote backup size and files count.
+
 ## v3.30.2
 
 * Fixed issues in the rclone_sync function (new rclone size format output in the version 1.57+).

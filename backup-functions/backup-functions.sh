@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.30.2
+bfver=3.30.3
 
 ## default variables
 myhostname=$(hostname -f)
@@ -45,7 +45,6 @@ clean_dir_regex='20[0-9][0-9][0-1][0-9][0-9][0-9]'
 no_compress=0
 
 ## enable file counting and backup weight checking in the remote storage (for awscli_sync and rclone_sync only).
-
 no_rmt_bckp_chck=0
 
 ## variables for checking free space
@@ -181,6 +180,8 @@ archiver_opts=()
 ## reset global flags
 glbl_backup_size=0
 glbl_backup_files_cnt=0
+glbl_rmt_bckp_size=0
+glbl_rmt_bckp_files_count=0
 glbl_err=0
 
 function show_error() {
@@ -267,7 +268,7 @@ EOF
 function backup_size_and_files_count() {
     local file="${1}"; local err=0
     test -f "${file}" || { show_error "Can not access ${file}!"; err=1;}
-    test -f "${file}" && { 
+    test -f "${file}" && {
         backup_size=$(du -sb "${file}" | awk '{print $1}')
         glbl_backup_size=$((${glbl_backup_size} + ${backup_size}))
         glbl_backup_files_cnt=$((${glbl_backup_files_cnt} + 1))
@@ -278,8 +279,6 @@ function backup_size_and_files_count() {
 function pushgateway_prepare_vars() {
     source=$(hostname); script_name=${0##*/}; backup_is_running=0
     script_end_time=$(date +%s)
-    pushgateway_last_backup_size="${glbl_backup_size}"
-    pushgateway_backup_files_quantity="${glbl_backup_files_cnt}"
     pushgateway_backup_required_space=$((pushgateway_last_backup_size+pushgateway_last_backup_size*backup_size_percent/100))
     pushgateway_backup_duration=$((script_end_time-script_start_time))
     pushgateway_backup_executing_duration=$((backup_end_time-backup_start_time))
@@ -324,16 +323,16 @@ backup_scheme{source="${source}",script_name="${script_name}",backup_type="weekl
 backup_scheme{source="${source}",script_name="${script_name}",backup_type="monthly"} ${remote_backups_monthly:-0}
 # HELP backup_size_bytes Last backup size in bytes.
 # TYPE backup_size_bytes gauge
-backup_size_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${pushgateway_last_backup_size:-0}
+backup_size_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${glbl_backup_size:-0}
 # HELP backup_files_quantity Total quantity of files in the backup.
 # TYPE backup_files_quantity gauge
-backup_files_quantity{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${pushgateway_backup_files_quantity:-0}
+backup_files_quantity{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${glbl_backup_files_cnt:-0}
 # HELP remote_backup_size_bytes Last remote backup size in bytes.
 # TYPE remote_backup_size_bytes gauge
-remote_backup_size_bytes{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}"} ${rmt_bckp_size:-0}
+remote_backup_size_bytes{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}"} ${glbl_rmt_bckp_size:-0}
 # HELP remote_backup_files_quantity Total quantity of files in the remote backup.
 # TYPE remote_backup_files_quantity gauge
-remote_backup_files_quantity{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}"} ${rmt_bckp_files_count:-0}
+remote_backup_files_quantity{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}"} ${glbl_rmt_bckp_files_count:-0}
 # HELP backup_required_space_bytes Required space in bytes for the backup plus some free space.
 # TYPE backup_required_space_bytes gauge
 backup_required_space_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}",backup_size_percent="${backup_size_percent}",minimum_free_space_percent="${minimum_free_space_percent}",freespace_ratio="${freespace_ratio}"} ${pushgateway_backup_required_space}
@@ -827,8 +826,8 @@ function rclone_sync() {
     test "${no_rmt_bckp_chck}" -eq 0 && {
         pushgateway_storage_name="${target%:*}"
         rmt_bckp_values=$(rclone size "${target}")
-        rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total objects:' | awk '{print $3}')
-        rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep -oP '\(\d+\sByte.*?\)' | grep -oP '\d+')
+        glbl_rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total objects:' | awk '{print $3}')
+        glbl_rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep -oP '\(\d+\sByte.*?\)' | grep -oP '\d+')
     }
     return "${err}"
 }
@@ -864,8 +863,8 @@ function awscli_sync() {
         pushgateway_storage_name=$(echo ${target} | awk -F/ '{print$3}')
         test -n "${profile}" || rmt_bckp_values=$(aws s3 ls --recursive --summarize "${target}" | tail -2)
         test -n "${profile}" && rmt_bckp_values=$(aws s3 ls --recursive --summarize "${target}" --profile "${profile}" | tail -2)
-        rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total Objects:' | grep -oP '\d+')
-        rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep 'Total Size:' | grep -oP '\d+')
+        glbl_rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total Objects:' | grep -oP '\d+')
+        glbl_rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep 'Total Size:' | grep -oP '\d+')
     }
     return "${err}"
 }
@@ -899,8 +898,8 @@ function minio_mirror() {
         command -v jq > /dev/null 2>&1 || { show_error "No jq binary found. Install jq or set no_rmt_bckp_chck=1." "${FUNCNAME}"; return 1; }
         pushgateway_storage_name="${target%%/*}"
         minio_json=$(minio-client ls -r --summarize --json "${target}")
-        rmt_bckp_files_count=$(jq '. | select(.totalObjects | length >= 1) | .totalObjects' <<< "${minio_json}")
-        rmt_bckp_size=$(jq '. | select(.totalObjects | length >= 1) | .totalSize' <<< "${minio_json}")
+        glbl_rmt_bckp_files_count=$(jq '. | select(.totalObjects | length >= 1) | .totalObjects' <<< "${minio_json}")
+        glbl_rmt_bckp_size=$(jq '. | select(.totalObjects | length >= 1) | .totalSize' <<< "${minio_json}")
     }
     return "${err}"
 }
@@ -1105,13 +1104,12 @@ function rabbitmq_backup() {
     show_notice "Exporting RabbitMQ and making an archive of mnesia directory..." "${FUNCNAME}"
     rabbitmqadmin export "${rabbitmqadmin_opts[@]}" "${dir}/rabbitmq_configuration.json" || {
         show_error "An error occurred while exporting RabbitMQ!" "${FUNCNAME}"
-        backup_size_and_files_count "${dir}/rabbitmq_configuration.json" || local err=1;
         local err=1
     }
     compress_dir "${rabbitmq_datadir}" "${dir}/rabbitmq_data.tar.${compress_ext}" || {
         show_error "An error occurred while archiving ${rabbitmq_datadir}!" "${FUNCNAME}"
-        backup_size_and_files_count "${dir}/rabbitmq_data.tar.${compress_ext}" || local err=1;
         local err=1
     }
+    backup_size_and_files_count "${dir}/rabbitmq_configuration.json" || local err=1;
     return "${err}"
 }

@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.31.1
+bfver=3.31.2
 
 ## default variables
 myhostname=$(hostname -f)
@@ -286,13 +286,18 @@ function pushgateway_prepare_vars() {
 }
 
 function pushgateway_send_result() {
-    local err=0; local backup_err_code="${1}"
-    test "${no_pushgateway}" -eq 1 && { show_notice "Pushgateway usage disabled."; return 0; }
+    local err=1; local backup_err_code="${1}"
+    local tmp_file
+    test "${no_pushgateway}" -eq 1 && {
+        show_notice "Pushgateway usage disabled."
+        err=0
+        return "${err}"
+    }
     test "${no_pushgateway}" -ne 1 && {
         pushgateway_prepare_vars
-
+        tmp_file=$(mktemp /tmp/backup-functions.XXXXXX)
         test "${script_mode}" == "default" && {
-            cat <<EOF | "${curl}" -sq "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
+            cat <<EOF >> "${tmp_file}"
 # HELP backup_script_info Information about script and library.
 # TYPE backup_script_info gauge
 backup_script_info{source="${source}",script_name="${script_name}",cbver="${cbver}",bfver="${bfver}"} 1
@@ -315,7 +320,7 @@ EOF
 }
 
         test "${script_mode}" == "default" -o "${script_mode}" == "backup_only" && {
-            cat <<EOF | "${curl}" -sq "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
+            cat <<EOF >> "${tmp_file}"
 # HELP backup_size_bytes Last backup size in bytes.
 # TYPE backup_size_bytes gauge
 backup_size_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${glbl_backup_size:-0}
@@ -351,12 +356,18 @@ remote_backup_files_quantity{source="${source}",script_name="${script_name}",sto
 EOF
 }
 
+        http_code=$("${curl}" -sq "${pushgateway_opts[@]}" --data-binary "@${tmp_file}" -o /dev/null -w "%{http_code}" "${pushgateway_url}")
+        test "${http_code}" == "200" && \
+            err=0
 }
-    test $? -eq 0 || {
-        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
-        local err=1;
-        return "${err}";
-    }
+
+    test "${err}" -eq 0 || \
+        show_error "Metrics were not sent to pushgateway (code ${http_code}). You should check provided pushgateway_url, pushgateway_opts and metrics. Prepared metrics: $(cat "${tmp_file}")"
+
+    test -f "${tmp_file}" && \
+        rm "${tmp_file}"
+
+    return "${err}"
 }
 
 ## choosing compress

@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.31.2
+
+* Proper error handling added to pushgateway_send_result().
+
 ## v3.31.1
 
 * Fixed metrics export in upload_only and backup_only scenarios (was failing due to no values)

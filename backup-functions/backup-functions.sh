@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.31.0
+bfver=3.31.1
 
 ## default variables
 myhostname=$(hostname -f)
@@ -283,9 +283,6 @@ function pushgateway_prepare_vars() {
     pushgateway_backup_duration=$((script_end_time-script_start_time))
     pushgateway_backup_executing_duration=$((backup_end_time-backup_start_time))
     pushgateway_backup_uploading_duration=$((upload_end_time-upload_start_time))
-    pushgateway_upload_util="unknown"
-    pushgateway_upload_protocol="unknown"
-    pushgateway_upload_domain="unknown"
 }
 
 function pushgateway_send_result() {
@@ -293,53 +290,67 @@ function pushgateway_send_result() {
     test "${no_pushgateway}" -eq 1 && { show_notice "Pushgateway usage disabled."; return 0; }
     test "${no_pushgateway}" -ne 1 && {
         pushgateway_prepare_vars
-        cat <<EOF | "${curl}" -sq "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
+
+        test "${script_mode}" == "default" && {
+            cat <<EOF | "${curl}" -sq "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
 # HELP backup_script_info Information about script and library.
 # TYPE backup_script_info gauge
 backup_script_info{source="${source}",script_name="${script_name}",cbver="${cbver}",bfver="${bfver}"} 1
 # HELP backup_is_running Сurrent state of the backup script (1 = running, 0 = exited)
 # TYPE backup_is_running gauge
 backup_is_running{source="${source}",script_name="${script_name}"} ${backup_is_running}
-# HELP backup_failure Script exit status (1 = error, 0 = success)
-# TYPE backup_failure gauge
+# HELP backup_script_failure Script exit status (1 = error, 0 = success)
+# TYPE backup_script_failure gauge
 backup_script_failure{source="${source}",script_name="${script_name}"} ${backup_err_code}
 # HELP backup_duration_seconds Script execution time, in seconds.
 # TYPE backup_duration_seconds gauge
 backup_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_duration}
-# HELP backup_executing_duration_seconds Backup execution time, in seconds.
-# TYPE backup_executing_duration_seconds gauge
-backup_executing_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_executing_duration}
-# HELP backup_uploading_duration_seconds Backup uploading time, in seconds.
-# TYPE backup_uploading_duration_seconds gauge
-backup_uploading_duration_seconds{source="${source}",script_name="${script_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${pushgateway_backup_uploading_duration}
-# HELP backup_start_time_seconds Unix timestamp of the backup script execution start.
-# TYPE backup_start_time_seconds counter
-backup_start_time_seconds{source="${source}",script_name="${script_name}"} ${backup_start_time}
-# HELP backup_end_time_seconds Unix timestamp of the backup script execution end.
-# TYPE backup_end_time_seconds counter
-backup_end_time_seconds{source="${source}",script_name="${script_name}"} ${backup_end_time}
 # HELP backup_scheme Backup scheme.
 # TYPE backup_scheme gauge
 backup_scheme{source="${source}",script_name="${script_name}",backup_type="local"} ${local_days}
 backup_scheme{source="${source}",script_name="${script_name}",backup_type="daily"} ${remote_backups_daily:-0}
 backup_scheme{source="${source}",script_name="${script_name}",backup_type="weekly"} ${remote_backups_weekly:-0}
 backup_scheme{source="${source}",script_name="${script_name}",backup_type="monthly"} ${remote_backups_monthly:-0}
+EOF
+}
+
+        test "${script_mode}" == "default" -o "${script_mode}" == "backup_only" && {
+            cat <<EOF | "${curl}" -sq "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
 # HELP backup_size_bytes Last backup size in bytes.
 # TYPE backup_size_bytes gauge
 backup_size_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${glbl_backup_size:-0}
 # HELP backup_files_quantity Total quantity of files in the backup.
 # TYPE backup_files_quantity gauge
 backup_files_quantity{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${glbl_backup_files_cnt:-0}
-# HELP remote_backup_size_bytes Last remote backup size in bytes.
-# TYPE remote_backup_size_bytes gauge
-remote_backup_size_bytes{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${glbl_rmt_bckp_size:-0}
-# HELP remote_backup_files_quantity Total quantity of files in the remote backup.
-# TYPE remote_backup_files_quantity gauge
-remote_backup_files_quantity{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${glbl_rmt_bckp_files_count:-0}
 # HELP backup_required_space_bytes Required space in bytes for the backup plus some free space.
 # TYPE backup_required_space_bytes gauge
 backup_required_space_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}",backup_size_percent="${backup_size_percent}",minimum_free_space_percent="${minimum_free_space_percent}",freespace_ratio="${freespace_ratio}"} ${pushgateway_backup_required_space}
+# HELP backup_executing_duration_seconds Backup execution time, in seconds.
+# TYPE backup_executing_duration_seconds gauge
+backup_executing_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_executing_duration}
+# HELP backup_start_time_seconds Unix timestamp of the backup script execution start.
+# TYPE backup_start_time_seconds counter
+backup_start_time_seconds{source="${source}",script_name="${script_name}"} ${backup_start_time}
+# HELP backup_end_time_seconds Unix timestamp of the backup script execution end.
+# TYPE backup_end_time_seconds counter
+backup_end_time_seconds{source="${source}",script_name="${script_name}"} ${backup_end_time}
 EOF
+}
+
+        test "${script_mode}" == "default" -o "${script_mode}" == "upload_only" && {
+            cat <<EOF | "${curl}" -sq "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
+# HELP remote_backup_size_bytes Last remote backup size in bytes.
+# TYPE remote_backup_size_bytes gauge
+remote_backup_size_bytes{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${glbl_rmt_bckp_size:-0}
+# HELP backup_uploading_duration_seconds Backup uploading time, in seconds.
+# TYPE backup_uploading_duration_seconds gauge
+backup_uploading_duration_seconds{source="${source}",script_name="${script_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${pushgateway_backup_uploading_duration}
+# HELP remote_backup_files_quantity Total quantity of files in the remote backup.
+# TYPE remote_backup_files_quantity gauge
+remote_backup_files_quantity{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${glbl_rmt_bckp_files_count:-0}
+EOF
+}
+
 }
     test $? -eq 0 || {
         show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
@@ -424,16 +435,19 @@ function main() {
 
         case "${1}" in
             "--backup"|"-b")
+                script_mode="backup_only"
                 test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_start
                 make_backup
                 test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_end
             ;;
             "--upload"|"-u")
+                script_mode="upload_only"
                 test "${no_pushgateway}" -ne 1 && pushgateway_send_upload_start
                 upload_backup
                 test "${no_pushgateway}" -ne 1 && pushgateway_send_upload_end
             ;;
             *)
+                script_mode="default"
                 test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_start
                 make_backup
                 test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_end

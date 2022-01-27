@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.31.1
+
+* Fixed metrics export in upload_only and backup_only scenarios (was failing due to no values)
+
 ## v3.31.0
 
 * Additional labels added to upload metrics (upload_util, upload_protocol, upload_domain). Auto-detection works only for awscli/rclone/minio-client for now.

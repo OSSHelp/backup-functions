@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.31.2
+bfver=3.31.3
 
 ## default variables
 myhostname=$(hostname -f)
@@ -296,8 +296,7 @@ function pushgateway_send_result() {
     test "${no_pushgateway}" -ne 1 && {
         pushgateway_prepare_vars
         tmp_file=$(mktemp /tmp/backup-functions.XXXXXX)
-        test "${script_mode}" == "default" && {
-            cat <<EOF >> "${tmp_file}"
+        cat <<EOF >> "${tmp_file}"
 # HELP backup_script_info Information about script and library.
 # TYPE backup_script_info gauge
 backup_script_info{source="${source}",script_name="${script_name}",cbver="${cbver}",bfver="${bfver}"} 1
@@ -317,7 +316,6 @@ backup_scheme{source="${source}",script_name="${script_name}",backup_type="daily
 backup_scheme{source="${source}",script_name="${script_name}",backup_type="weekly"} ${remote_backups_weekly:-0}
 backup_scheme{source="${source}",script_name="${script_name}",backup_type="monthly"} ${remote_backups_monthly:-0}
 EOF
-}
 
         test "${script_mode}" == "default" -o "${script_mode}" == "backup_only" && {
             cat <<EOF >> "${tmp_file}"

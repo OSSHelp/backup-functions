@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.31.0
+
+* Additional labels added to upload metrics (upload_util, upload_protocol, upload_domain). Auto-detection works only for awscli/rclone/minio-client for now.
+
 ## v3.30.3
 
 * Fixed issues in the rabbitmq_backup function (files size and quantity counting).

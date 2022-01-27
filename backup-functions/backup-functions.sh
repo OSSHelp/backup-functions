@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.30.3
+bfver=3.31.0
 
 ## default variables
 myhostname=$(hostname -f)
@@ -283,6 +283,9 @@ function pushgateway_prepare_vars() {
     pushgateway_backup_duration=$((script_end_time-script_start_time))
     pushgateway_backup_executing_duration=$((backup_end_time-backup_start_time))
     pushgateway_backup_uploading_duration=$((upload_end_time-upload_start_time))
+    pushgateway_upload_util="unknown"
+    pushgateway_upload_protocol="unknown"
+    pushgateway_upload_domain="unknown"
 }
 
 function pushgateway_send_result() {
@@ -308,7 +311,7 @@ backup_duration_seconds{source="${source}",script_name="${script_name}"} ${pushg
 backup_executing_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_executing_duration}
 # HELP backup_uploading_duration_seconds Backup uploading time, in seconds.
 # TYPE backup_uploading_duration_seconds gauge
-backup_uploading_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_uploading_duration}
+backup_uploading_duration_seconds{source="${source}",script_name="${script_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${pushgateway_backup_uploading_duration}
 # HELP backup_start_time_seconds Unix timestamp of the backup script execution start.
 # TYPE backup_start_time_seconds counter
 backup_start_time_seconds{source="${source}",script_name="${script_name}"} ${backup_start_time}
@@ -329,10 +332,10 @@ backup_size_bytes{source="${source}",script_name="${script_name}",backup_dir="${
 backup_files_quantity{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${glbl_backup_files_cnt:-0}
 # HELP remote_backup_size_bytes Last remote backup size in bytes.
 # TYPE remote_backup_size_bytes gauge
-remote_backup_size_bytes{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}"} ${glbl_rmt_bckp_size:-0}
+remote_backup_size_bytes{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${glbl_rmt_bckp_size:-0}
 # HELP remote_backup_files_quantity Total quantity of files in the remote backup.
 # TYPE remote_backup_files_quantity gauge
-remote_backup_files_quantity{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}"} ${glbl_rmt_bckp_files_count:-0}
+remote_backup_files_quantity{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${glbl_rmt_bckp_files_count:-0}
 # HELP backup_required_space_bytes Required space in bytes for the backup plus some free space.
 # TYPE backup_required_space_bytes gauge
 backup_required_space_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}",backup_size_percent="${backup_size_percent}",minimum_free_space_percent="${minimum_free_space_percent}",freespace_ratio="${freespace_ratio}"} ${pushgateway_backup_required_space}
@@ -813,6 +816,7 @@ function backup_gitlab() {
 
 function rclone_sync() {
     local err=0; local source="${1}"; local target="${2}"
+    local detected_domain
     command -v rclone > /dev/null 2>&1 || { show_error "Install rclone first!" "${FUNCNAME[0]}"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME[0]}"; return 1; }
     show_notice "Sync ${source} to ${target}" "${FUNCNAME[0]}"
@@ -825,6 +829,10 @@ function rclone_sync() {
     }
     test "${no_rmt_bckp_chck}" -eq 0 && {
         pushgateway_storage_name="${target%:*}"
+        pushgateway_upload_util="rclone"
+        pushgateway_upload_protocol=$(rclone config show ${target%:*} | grep 'type' | awk '{print $3}')
+        detected_domain=$(rclone config show ${target%:*} | grep 'endpoint' | awk '{print $3}')
+        test -z "${detected_domain}" || pushgateway_upload_domain="${detected_domain}"
         rmt_bckp_values=$(rclone size "${target}")
         glbl_rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total objects:' | awk '{print $3}')
         glbl_rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep -oP '\(\d+\sByte.*?\)' | grep -oP '\d+')
@@ -861,8 +869,16 @@ function awscli_sync() {
     }
     test "${no_rmt_bckp_chck}" -eq 0 && {
         pushgateway_storage_name=$(echo ${target} | awk -F/ '{print$3}')
-        test -n "${profile}" || rmt_bckp_values=$(aws s3 ls --recursive --summarize "${target}" | tail -2)
-        test -n "${profile}" && rmt_bckp_values=$(aws s3 ls --recursive --summarize "${target}" --profile "${profile}" | tail -2)
+        pushgateway_upload_util="awscli"
+        pushgateway_upload_protocol="s3"
+        test -n "${profile}" && {
+            pushgateway_upload_domain=$(aws configure get s3.endpoint_url --profile "${profile}" | awk -F/ '{print $3}')
+            rmt_bckp_values=$(aws s3 ls --recursive --summarize "${target}" --profile "${profile}" | tail -2)
+        }
+        test -n "${profile}" || {
+            pushgateway_upload_domain=$(aws configure get s3.endpoint_url | awk -F/ '{print $3}')
+            rmt_bckp_values=$(aws s3 ls --recursive --summarize "${target}" | tail -2)
+        }
         glbl_rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total Objects:' | grep -oP '\d+')
         glbl_rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep 'Total Size:' | grep -oP '\d+')
     }
@@ -897,6 +913,9 @@ function minio_mirror() {
     test "${no_rmt_bckp_chck}" -eq 0 && {
         command -v jq > /dev/null 2>&1 || { show_error "No jq binary found. Install jq or set no_rmt_bckp_chck=1." "${FUNCNAME}"; return 1; }
         pushgateway_storage_name="${target%%/*}"
+        pushgateway_upload_util="minio-client"
+        pushgateway_upload_protocol="s3"
+        pushgateway_upload_domain=$(minio-client alias list ${target%%/*} --json | jq -r .URL | awk -F/ '{print $3}')
         minio_json=$(minio-client ls -r --summarize --json "${target}")
         glbl_rmt_bckp_files_count=$(jq '. | select(.totalObjects | length >= 1) | .totalObjects' <<< "${minio_json}")
         glbl_rmt_bckp_size=$(jq '. | select(.totalObjects | length >= 1) | .totalSize' <<< "${minio_json}")

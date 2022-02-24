@@ -51,6 +51,8 @@ It also supports:
 
 ### How to use it
 
+> **_NOTE:_**  If you want to send backup metrics to Pushgateway in version 4.x.x, you need to install [pushgateway-functions](https://gitea.osshelp.ru/OSSHelp/pushgateway-functions).
+
 The library must be included in the backup scripts. In the examples folder you can find examples based on `backup-functions/custom.backup` template.
 
 How to use the library:

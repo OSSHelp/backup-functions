@@ -1,5 +1,14 @@
 # Changelog
 
+## v4.0.0
+
+* Metric export completely switched to pushgateway-functions
+* Removed no_rmt_bckp_chck flag
+* Minio-client, awscli and rclone upload functions received optional argument to disable uploaded files checking
+* Fixed backup_required_space_bytes metric value generation
+* Various syntax adjustments
+* Fixed awscli profiles bug
+
 ## v3.31.3
 
 * Adjusted metrics export in backup-only and upload-only scenarios.

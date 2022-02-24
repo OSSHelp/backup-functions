@@ -1,5 +1,5 @@
 ## OSSHelp backup functions library.
-# shellcheck disable=SC2128,SC2191,SC2207,SC2164,SC1090,SC2219,SC2206,SC2086
+# shellcheck disable=SC2128,SC2191,SC2207,SC2164,SC1090,SC2219,SC2206,SC2086,SC2065,SC2034,SC2015,SC2154,SC2094
 ## TODO
 ## https://oss.help/57009
 ## https://oss.help/25714
@@ -8,10 +8,12 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=3.31.3
+bfver=4.0.1
 
 ## default variables
 myhostname=$(hostname -f)
+source=$(hostname)
+script_name=${0##*/}
 log_file=/var/log/${0##*/}.log
 lock_file=/tmp/${0##*/}.lock
 current_date=$(date '+%Y%m%d')
@@ -22,10 +24,17 @@ nproc=$(command -v nproc)
 curl=$(command -v curl)
 test -x "${nproc}" && core_num=$("${nproc}" 2>/dev/null)
 
-## Pushgateway options
-pushgateway_url="http://netdata-master:9091/metrics/job/${0##*/}/source/${myhostname%.*}"
-pushgateway_opts=()
-no_pushgateway=0
+## Pushgateway section
+pf_lib="/usr/local/include/osshelp/pushgateway-functions.sh"
+function need_metrics() { test "${no_pushgateway:-0}" == "0"; }
+need_metrics && {
+    test -r "${pf_lib}" -a -s "${pf_lib}" || {
+        echo "Library ${pf_lib} doesn't exist!"
+        exit 1
+    }
+    pushgateway_default_labels=(script_name="${script_name}")
+    . "${pf_lib}"
+}
 
 ## scheme vars
 local_days=0
@@ -43,9 +52,6 @@ clean_dir_regex='20[0-9][0-9][0-1][0-9][0-9][0-9]'
 
 ## enable compressing in mysql_dump_db, mysql_dump_db_tables, mongo_dump_all, sqlite_dump_db, pg_dump_all and pg_dump_db functions by default
 no_compress=0
-
-## enable file counting and backup weight checking in the remote storage (for awscli_sync and rclone_sync only).
-no_rmt_bckp_chck=0
 
 ## variables for checking free space
 backup_size_file=/var/backups/${0##*/}.size
@@ -180,8 +186,6 @@ archiver_opts=()
 ## reset global flags
 glbl_backup_size=0
 glbl_backup_files_cnt=0
-glbl_rmt_bckp_size=0
-glbl_rmt_bckp_files_count=0
 glbl_err=0
 
 function show_error() {
@@ -195,175 +199,110 @@ function show_notice() {
     echo -e "[NOTICE.${funcname} ${log_date}] ${message}"
 }
 
-function pushgateway_send_script_start() {
-    local err=0; hostname=$(hostname); script_name=${0##*/}; script_start_time=$(date +%s); backup_is_running=1
-    cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
-# HELP backup_is_running Сurrent state of the backup creating (1 = running, 0 = exited)
-# TYPE backup_is_running gauge
-backup_is_running{script_name="${script_name}",hostname="${hostname}"} ${backup_is_running}
-EOF
-    test $? -eq 0 || {
-        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
-        local err=1;
-        return "${err}";
-    }
+function have_binary() { command -v "${1}" >/dev/null 2>&1; }
+
+function pushgateway_register_metrics() {
+    pushgateway_register_metric backup_is_running gauge "Сurrent state of the backup script (1 = running, 0 = exited)"
+    pushgateway_register_metric backup_is_executing gauge "Сurrent state of the backup executing (1 = running, 0 = exited)"
+    pushgateway_register_metric upload_is_executing gauge "Сurrent state of the backup executing (1 = running, 0 = exited)"
+    pushgateway_register_metric backup_script_info gauge "Information about script and libraries."
+    pushgateway_register_metric backup_script_failure gauge "Script exit status (1 = error, 0 = success)"
+    pushgateway_register_metric backup_duration_seconds gauge "Script execution time, in seconds."
+    pushgateway_register_metric backup_scheme gauge "Backup scheme."
+    pushgateway_register_metric backup_size_bytes gauge "Last backup size in bytes."
+    pushgateway_register_metric backup_files_quantity gauge "Total quantity of files in the backup."
+    pushgateway_register_metric backup_required_space_bytes gauge "Required space in bytes for the backup plus some free space."
+    pushgateway_register_metric backup_executing_duration_seconds gauge "Backup execution time, in seconds."
+    pushgateway_register_metric backup_start_time_seconds counter "Unix timestamp of the backup script execution start."
+    pushgateway_register_metric backup_end_time_seconds counter "Unix timestamp of the backup script execution end."
+    pushgateway_register_metric remote_backup_size_bytes gauge "Last remote backup size in bytes."
+    pushgateway_register_metric backup_uploading_duration_seconds gauge "Backup uploading time, in seconds."
+    pushgateway_register_metric remote_backup_files_quantity gauge "Total quantity of files in the remote backup."
 }
 
 function pushgateway_send_backup_start() {
-    local err=0; hostname=$(hostname); script_name=${0##*/}; backup_start_time=$(date +%s); backup_is_executing=1
-    cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
-# HELP backup_is_executing Сurrent state of the backup executing (1 = running, 0 = exited)
-# TYPE backup_is_executing gauge
-backup_is_executing{script_name="${script_name}",hostname="${hostname}"} ${backup_is_executing}
-EOF
-    test $? -eq 0 || {
-        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
-        local err=1;
-        return "${err}";
-    }
+    backup_start_time=$(date +%s)
+    pushgateway_set_value backup_is_executing 1 "${pushgateway_default_labels[@]}"
+    pushgateway_send_metrics
 }
 
 function pushgateway_send_backup_end() {
-    local err=0; backup_end_time=$(date +%s); backup_end_time=$(date +%s); backup_is_executing=0
-    cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
-# HELP backup_is_executing Сurrent state of the backup executing (1 = running, 0 = exited)
-# TYPE backup_is_executing gauge
-backup_is_executing{script_name="${script_name}",hostname="${hostname}"} ${backup_is_executing}
-EOF
-    test $? -eq 0 || {
-        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
-        local err=1;
-        return "${err}";
-    }
+    backup_end_time=$(date +%s)
+    pushgateway_set_value backup_is_executing 0 "${pushgateway_default_labels[@]}"
+    pushgateway_send_metrics
 }
 
 function pushgateway_send_upload_start() {
-    local err=0; hostname=$(hostname); script_name=${0##*/}; upload_start_time=$(date +%s); upload_is_executing=1
-    cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
-# HELP upload_is_executing Сurrent state of the backup executing (1 = running, 0 = exited)
-# TYPE upload_is_executing gauge
-upload_is_executing{script_name="${script_name}",hostname="${hostname}"} ${upload_is_executing}
-EOF
-    test $? -eq 0 || {
-        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
-        local err=1;
-        return "${err}";
-    }
+    pushgateway_set_value upload_is_executing 1 "${pushgateway_default_labels[@]}"
+    pushgateway_send_metrics
 }
 
 function pushgateway_send_upload_end() {
-    local err=0; hostname=$(hostname); script_name=${0##*/}; upload_end_time=$(date +%s); upload_is_executing=0
-    cat <<EOF | "${curl}" -qs "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
-# HELP upload_is_executing Сurrent state of the backup executing (1 = running, 0 = exited)
-# TYPE upload_is_executing gauge
-upload_is_executing{script_name="${script_name}",hostname="${hostname}"} ${upload_is_executing}
-EOF
-    test $? -eq 0 || {
-        show_error "Metrics were not sent to pushgateway. You should check provided pushgateway_url and pushgateway_opts.";
-        local err=1;
-        return "${err}";
-    }
+    pushgateway_set_value upload_is_executing 0 "${pushgateway_default_labels[@]}"
+    pushgateway_send_metrics
+}
+
+function pushgateway_send_upload_details() {
+    local util="${1}"
+    local protocol="${2}"
+    local domain="${3}"
+    local duration="${4}"
+    local remote_size="${5}"
+    local files_quantity="${6}"
+    local upload_labels=(upload_util="${util}" upload_protocol="${protocol}")
+
+    test "${domain:-unknown}" != "unknown" && \
+        upload_labels+=(upload_domain="${domain}")
+    test "${remote_size:-unknown}" != "unknown" && \
+        pushgateway_set_value remote_backup_size_bytes ${remote_size} "${pushgateway_default_labels[@]}" "${upload_labels[@]}"
+    test "${files_quantity:-unknown}" != "unknown" && \
+        pushgateway_set_value remote_backup_files_quantity ${files_quantity} "${pushgateway_default_labels[@]}" "${upload_labels[@]}"
+    pushgateway_set_value backup_uploading_duration_seconds ${duration} "${pushgateway_default_labels[@]}" "${upload_labels[@]}"
+    pushgateway_send_metrics upload_domain="${domain}"
 }
 
 function backup_size_and_files_count() {
     local file="${1}"; local err=0
-    test -f "${file}" || { show_error "Can not access ${file}!"; err=1;}
+    test -f "${file}" || { show_error "Can not access ${file}!"; err=1; }
     test -f "${file}" && {
         backup_size=$(du -sb "${file}" | awk '{print $1}')
-        glbl_backup_size=$((${glbl_backup_size} + ${backup_size}))
-        glbl_backup_files_cnt=$((${glbl_backup_files_cnt} + 1))
+        glbl_backup_size=$((glbl_backup_size + backup_size))
+        glbl_backup_files_cnt=$((glbl_backup_files_cnt + 1))
     }
     return "${err}"
 }
 
-function pushgateway_prepare_vars() {
-    source=$(hostname); script_name=${0##*/}; backup_is_running=0
-    script_end_time=$(date +%s)
-    pushgateway_backup_required_space=$((pushgateway_last_backup_size+pushgateway_last_backup_size*backup_size_percent/100))
-    pushgateway_backup_duration=$((script_end_time-script_start_time))
-    pushgateway_backup_executing_duration=$((backup_end_time-backup_start_time))
-    pushgateway_backup_uploading_duration=$((upload_end_time-upload_start_time))
-}
-
 function pushgateway_send_result() {
-    local err=1; local backup_err_code="${1}"
-    local tmp_file
-    test "${no_pushgateway}" -eq 1 && {
+    local backup_err_code="${1}"
+    local script_end_time
+    local err=0
+    script_end_time=$(date +%s)
+
+    need_metrics || {
         show_notice "Pushgateway usage disabled."
-        err=0
         return "${err}"
     }
-    test "${no_pushgateway}" -ne 1 && {
-        pushgateway_prepare_vars
-        tmp_file=$(mktemp /tmp/backup-functions.XXXXXX)
-        cat <<EOF >> "${tmp_file}"
-# HELP backup_script_info Information about script and library.
-# TYPE backup_script_info gauge
-backup_script_info{source="${source}",script_name="${script_name}",cbver="${cbver}",bfver="${bfver}"} 1
-# HELP backup_is_running Сurrent state of the backup script (1 = running, 0 = exited)
-# TYPE backup_is_running gauge
-backup_is_running{source="${source}",script_name="${script_name}"} ${backup_is_running}
-# HELP backup_script_failure Script exit status (1 = error, 0 = success)
-# TYPE backup_script_failure gauge
-backup_script_failure{source="${source}",script_name="${script_name}"} ${backup_err_code}
-# HELP backup_duration_seconds Script execution time, in seconds.
-# TYPE backup_duration_seconds gauge
-backup_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_duration}
-# HELP backup_scheme Backup scheme.
-# TYPE backup_scheme gauge
-backup_scheme{source="${source}",script_name="${script_name}",backup_type="local"} ${local_days}
-backup_scheme{source="${source}",script_name="${script_name}",backup_type="daily"} ${remote_backups_daily:-0}
-backup_scheme{source="${source}",script_name="${script_name}",backup_type="weekly"} ${remote_backups_weekly:-0}
-backup_scheme{source="${source}",script_name="${script_name}",backup_type="monthly"} ${remote_backups_monthly:-0}
-EOF
+    last_backup_size_bytes=$((last_backup_size*1024*1024))
+    pushgateway_set_value backup_script_info 1 "${pushgateway_default_labels[@]}" pfver="${pfver}" cbver="${cbver}" bfver="${bfver}"
+    pushgateway_set_value backup_is_running 0 "${pushgateway_default_labels[@]}"
+    pushgateway_set_value backup_script_failure "${backup_err_code}" "${pushgateway_default_labels[@]}"
+    pushgateway_set_value backup_duration_seconds "$((script_end_time-script_start_time))" "${pushgateway_default_labels[@]}"
+    pushgateway_set_value backup_scheme "${local_days}" "${pushgateway_default_labels[@]}" backup_type="local"
+    pushgateway_set_value backup_scheme "${remote_backups_daily:-0}" "${pushgateway_default_labels[@]}" backup_type="daily"
+    pushgateway_set_value backup_scheme "${remote_backups_weekly:-0}" "${pushgateway_default_labels[@]}" backup_type="weekly"
+    pushgateway_set_value backup_scheme "${remote_backups_monthly:-0}" "${pushgateway_default_labels[@]}" backup_type="monthly"
+    pushgateway_send_metrics || err=1
 
-        test "${script_mode}" == "default" -o "${script_mode}" == "backup_only" && {
-            cat <<EOF >> "${tmp_file}"
-# HELP backup_size_bytes Last backup size in bytes.
-# TYPE backup_size_bytes gauge
-backup_size_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${glbl_backup_size:-0}
-# HELP backup_files_quantity Total quantity of files in the backup.
-# TYPE backup_files_quantity gauge
-backup_files_quantity{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}"} ${glbl_backup_files_cnt:-0}
-# HELP backup_required_space_bytes Required space in bytes for the backup plus some free space.
-# TYPE backup_required_space_bytes gauge
-backup_required_space_bytes{source="${source}",script_name="${script_name}",backup_dir="${backup_dir}",backup_size_percent="${backup_size_percent}",minimum_free_space_percent="${minimum_free_space_percent}",freespace_ratio="${freespace_ratio}"} ${pushgateway_backup_required_space}
-# HELP backup_executing_duration_seconds Backup execution time, in seconds.
-# TYPE backup_executing_duration_seconds gauge
-backup_executing_duration_seconds{source="${source}",script_name="${script_name}"} ${pushgateway_backup_executing_duration}
-# HELP backup_start_time_seconds Unix timestamp of the backup script execution start.
-# TYPE backup_start_time_seconds counter
-backup_start_time_seconds{source="${source}",script_name="${script_name}"} ${backup_start_time}
-# HELP backup_end_time_seconds Unix timestamp of the backup script execution end.
-# TYPE backup_end_time_seconds counter
-backup_end_time_seconds{source="${source}",script_name="${script_name}"} ${backup_end_time}
-EOF
-}
-
-        test "${script_mode}" == "default" -o "${script_mode}" == "upload_only" && {
-            cat <<EOF | "${curl}" -sq "${pushgateway_opts[@]}" --data-binary @- "${pushgateway_url}"
-# HELP remote_backup_size_bytes Last remote backup size in bytes.
-# TYPE remote_backup_size_bytes gauge
-remote_backup_size_bytes{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${glbl_rmt_bckp_size:-0}
-# HELP backup_uploading_duration_seconds Backup uploading time, in seconds.
-# TYPE backup_uploading_duration_seconds gauge
-backup_uploading_duration_seconds{source="${source}",script_name="${script_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${pushgateway_backup_uploading_duration}
-# HELP remote_backup_files_quantity Total quantity of files in the remote backup.
-# TYPE remote_backup_files_quantity gauge
-remote_backup_files_quantity{source="${source}",script_name="${script_name}",storage_name="${pushgateway_storage_name}",upload_util="${pushgateway_upload_util:-unknown}",upload_protocol="${pushgateway_upload_protocol:-unknown}",upload_domain="${pushgateway_upload_domain:-unknown}"} ${glbl_rmt_bckp_files_count:-0}
-EOF
-}
-
-        http_code=$("${curl}" -sq "${pushgateway_opts[@]}" --data-binary "@${tmp_file}" -o /dev/null -w "%{http_code}" "${pushgateway_url}")
-        test "${http_code}" == "200" && \
-            err=0
-}
-
-    test "${err}" -eq 0 || \
-        show_error "Metrics were not sent to pushgateway (code ${http_code}). You should check provided pushgateway_url, pushgateway_opts and metrics. Prepared metrics: $(cat "${tmp_file}")"
-
-    test -f "${tmp_file}" && \
-        rm "${tmp_file}"
+    test "${script_mode}" == "default" -o "${script_mode}" == "backup_only" && {
+        pushgateway_set_value backup_size_bytes "${glbl_backup_size:-0}" "${pushgateway_default_labels[@]}" backup_dir="${backup_dir}"
+        pushgateway_set_value backup_files_quantity "${glbl_backup_files_cnt:-0}" "${pushgateway_default_labels[@]}" backup_dir="${backup_dir}"
+        test ${last_backup_size:-0} -gt 0 && \
+            pushgateway_set_value backup_required_space_bytes "$((last_backup_size_bytes+last_backup_size_bytes*backup_size_percent/100))" "${pushgateway_default_labels[@]}" backup_dir="${backup_dir}" backup_size_percent="${backup_size_percent}" minimum_free_space_percent="${minimum_free_space_percent}" freespace_ratio="${freespace_ratio}"
+        pushgateway_set_value backup_executing_duration_seconds "$((backup_end_time-backup_start_time))" "${pushgateway_default_labels[@]}"
+        pushgateway_set_value backup_start_time_seconds "${backup_start_time}" "${pushgateway_default_labels[@]}"
+        pushgateway_set_value backup_end_time_seconds "${backup_end_time}" "${pushgateway_default_labels[@]}"
+        pushgateway_send_metrics || err=1
+    }
 
     return "${err}"
 }
@@ -381,12 +320,12 @@ case "${archiver_prog##*/}" in
 esac
 
 function make_flock() {
-    command -v flock > /dev/null 2>&1 || { show_error "No flock installed. You need to install flock first."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
+    have_binary flock || { show_error "No flock installed. You need to install flock first."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
     exec 9>> "${lock_file:?}"
     flock -n 9 || {
         show_error "Sorry, ${0##*/} is already running. Please, wait until it's finished:\n"
-        command -v pstree > /dev/null 2>&1 && pstree -Alpacu "$(cat "${lock_file}")"
-        command -v pstree > /dev/null 2>&1 || { pid=$(cat "${lock_file}"); ps f "${pid}" -"${pid}"; }
+        have_binary pstree && pstree -Alpacu "$(cat "${lock_file}")"
+        have_binary pstree || { pid=$(cat "${lock_file}"); ps f "${pid}" -"${pid}"; }
         pushgateway_send_result "${glbl_err:?}"
         exit 1
     }
@@ -416,10 +355,10 @@ function detect_type() {
     }
 
     test "${#backup_type[*]}" -eq 0 || {
-        test "${!backup_type[*]}" = "${!backup_inc_type[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_inc_type array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
-        test "${!backup_type[*]}" = "${!backup_count[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_count array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
-        test "${!backup_type[*]}" = "${!backup_date_pattern[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_date_pattern array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
-        test "${!backup_type[*]}" = "${!backup_days_multiplier[*]}" || { show_error "Number of elements in the backup_type array do not equals number of elements in the backup_days_multiplier array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
+        test "${!backup_type[*]}" = "${!backup_inc_type[*]}" || { show_error "Number of elements in the backup_type array differs from the number of elements in the backup_inc_type array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
+        test "${!backup_type[*]}" = "${!backup_count[*]}" || { show_error "Number of elements in the backup_type array differs from the number of elements in the backup_count array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
+        test "${!backup_type[*]}" = "${!backup_date_pattern[*]}" || { show_error "Number of elements in the backup_type array differs from the number of elements in the backup_date_pattern array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
+        test "${!backup_type[*]}" = "${!backup_days_multiplier[*]}" || { show_error "Number of elements in the backup_type array differs from the number of elements in the backup_days_multiplier array. Exiting..."; pushgateway_send_result "${glbl_err:?}"; exit 1; }
         for index in "${!backup_type[@]}"; do
                 test ${backup_date_pattern[$index]} && {
                     type="${backup_type[$index]}"
@@ -438,31 +377,38 @@ function detect_type() {
 function main() {
     {
         show_notice "Backup script started."
-        test "${no_pushgateway}" -ne 1 && pushgateway_send_script_start
+        need_metrics && {
+            script_start_time=$(date +%s)
+            pushgateway_register_metrics
+            pushgateway_set_value backup_is_running 1 "${pushgateway_default_labels[@]}"
+            pushgateway_send_metrics
+        }
         detect_type
         make_flock
 
         case "${1}" in
             "--backup"|"-b")
                 script_mode="backup_only"
-                test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_start
+                need_metrics && pushgateway_send_backup_start
                 make_backup
-                test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_end
+                need_metrics && pushgateway_send_backup_end
             ;;
             "--upload"|"-u")
                 script_mode="upload_only"
-                test "${no_pushgateway}" -ne 1 && pushgateway_send_upload_start
+                need_metrics && pushgateway_send_upload_start
                 upload_backup
-                test "${no_pushgateway}" -ne 1 && pushgateway_send_upload_end
+                need_metrics && pushgateway_send_upload_end
             ;;
             *)
                 script_mode="default"
-                test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_start
+                need_metrics && pushgateway_send_backup_start
                 make_backup
-                test "${no_pushgateway}" -ne 1 && pushgateway_send_backup_end
-                test "${no_pushgateway}" -ne 1 && pushgateway_send_upload_start
+                need_metrics && {
+                    pushgateway_send_backup_end
+                    pushgateway_send_upload_start
+                }
                 upload_backup
-                test "${no_pushgateway}" -ne 1 && pushgateway_send_upload_end
+                need_metrics && pushgateway_send_upload_end
             ;;
         esac
 
@@ -540,7 +486,7 @@ function clean_dir() {
 
 function mysql_dump_all() {
     local err=0; local dir="${1}"
-    command -v mysqldump > /dev/null 2>&1 || { show_error "No mysqldump installed!" "${FUNCNAME}"; return 1; }
+    have_binary mysqldump || { show_error "No mysqldump installed!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     for current_db in $(mysql "${mysql_opts[@]}" -B -N -e "show databases;" | grep -vE "^(${mysql_ignore_databases})$"); do
@@ -556,7 +502,7 @@ function mysql_dump_all() {
 
 function mysql_dump_db() {
     local err=0; local dir="${1}"; local db="${2}"; local prefix="${3}"
-    command -v mysqldump > /dev/null 2>&1 || { show_error "No mysqldump installed!" "${FUNCNAME}"; return 1; }
+    have_binary mysqldump || { show_error "No mysqldump installed!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || test "${#}" -eq 3 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     show_notice "Dumping database ${db}" "${FUNCNAME}"
@@ -571,7 +517,7 @@ function mysql_dump_db() {
 
 function mysql_dump_all_tables() {
     local err=0; local dir="${1}"
-    command -v mysqldump > /dev/null 2>&1 || { show_error "No mysqldump installed!" "${FUNCNAME}"; return 1; }
+    have_binary mysqldump || { show_error "No mysqldump installed!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     for current_db in $(mysql "${mysql_opts[@]}" -B -N -e "show databases;" | grep -vE "^(${mysql_ignore_databases})$"); do
         db_tables_list=($(mysql "${mysql_opts[@]}" -B -N -e "show tables;" "${current_db}" | sed "s/^/${current_db}./" | grep -vE "^($mysql_ignore_tables)$" | sed "s/^${current_db}\.//"))
@@ -594,7 +540,7 @@ function mysql_dump_all_tables() {
 
 function mysql_dump_db_tables() {
     local err=0; local dir="${1}"; local db="${2}"; local prefix="${3}"
-    command -v mysqldump > /dev/null 2>&1 || { show_error "No mysqldump installed!" "${FUNCNAME}"; return 1; }
+    have_binary mysqldump || { show_error "No mysqldump installed!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || test "${#}" -eq 3 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test "${#db_tables[*]}" -eq 0 && { db_tables=($(mysql "${mysql_opts[@]}" -B -N -e "show tables;" "${db}" | sed "s/^/${db}./" | grep -vE "^(${mysql_ignore_tables})$" | sed "s/^${db}\.//")); }
     show_notice "Dumping database ${db} to separated table files" "${FUNCNAME}"
@@ -614,7 +560,7 @@ function mysql_dump_db_tables() {
 
 function mysql_xtra_backup_db() {
     local err=0; local dir="${1}"; local db="${2}"
-    command -v innobackupex > /dev/null 2>&1 || { show_error "No innobackupex installed!" "${FUNCNAME}"; return 1; }
+    have_binary innobackupex || { show_error "No innobackupex installed!" "${FUNCNAME}"; return 1; }
     test -f "/root/.my.cnf" || { show_error "No /root/.my.cnf file with access credintials!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
@@ -632,7 +578,7 @@ function mysql_xtra_backup_db() {
 
 function mysql_xtra_backup_all() {
     local err=0; local dir="${1}"
-    command -v innobackupex > /dev/null 2>&1 || { show_error "No innobackupex installed!" "${FUNCNAME[0]}"; return 1; }
+    have_binary innobackupex || { show_error "No innobackupex installed!" "${FUNCNAME[0]}"; return 1; }
     test -f "/root/.my.cnf" || { show_error "No /root/.my.cnf file with access credintials!" "${FUNCNAME[0]}"; return 1; }
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME[0]}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
@@ -651,7 +597,7 @@ function mysql_xtra_backup_all() {
 
 function sqlite_dump_db() {
     local err=0; local dir="${1}"; local db_path="${2}"; local dump_name=${3:-$(basename "${db_path}")}
-    command -v sqlite3 > /dev/null 2>&1 || { show_error "No sqlite3 installed!" "${FUNCNAME}"; return 1; }
+    have_binary sqlite3 || { show_error "No sqlite3 installed!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || test "${#}" -eq 3 || { show_error "Wrong usage of the function! Args=${*}" "$FUNCNAME"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     show_notice "Dumping sqlite database ${db}" "${FUNCNAME}"
@@ -666,7 +612,7 @@ function sqlite_dump_db() {
 
 function mongo_dump_all() {
     local err=0; local dir="${1}"
-    command -v mongodump > /dev/null || { show_error "No mongodump installed." "${FUNCNAME}"; return 1;}
+    have_binary mongodump || { show_error "No mongodump installed." "${FUNCNAME}"; return 1;}
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     for current_db in $(echo 'show dbs' | mongo "${mongo_opts[@]}" --quiet | awk '{print $1}' | grep -vE "^(${mongo_ignore_databases})$"); do
@@ -683,7 +629,7 @@ function mongo_dump_all() {
 
 function mongo_dump_all_old() {
     local err=0; local dir="${1}"
-    command -v mongodump > /dev/null || { show_error "No mongodump installed." "${FUNCNAME}"; return 1;}
+    have_binary mongodump || { show_error "No mongodump installed." "${FUNCNAME}"; return 1;}
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     for current_db in $(echo 'show dbs' | mongo "${mongo_opts[@]}" --quiet | awk '{print $1}' | grep -vE "^(${mongo_ignore_databases})$"); do
@@ -740,7 +686,7 @@ function pg_repl_ctl {
     local err=0; local rpl_status="${1}"; local psql_ver='unknown'
     local repl_stop_command='pg_xlog_replay_pause'; repl_resume_command='pg_xlog_replay_resume'; repl_status_command='pg_is_xlog_replay_paused'
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}. Use this function with pause/resume arg only." "${FUNCNAME}"; return 1; }
-    command -v psql > /dev/null 2>&1 || { show_error "No psql installed!" "${FUNCNAME}"; return 1; }
+    have_binary psql || { show_error "No psql installed!" "${FUNCNAME}"; return 1; }
     psql_ver=$(psql -V | grep -Po '\s\d+.\d+\s' | cut -d. -f1)
     test "${psql_ver}" = "unknown" && { show_error "Can't get PostgreSQL version!" "${FUNCNAME}"; return 1; }
     test "${psql_ver}" -ge "10" && { repl_stop_command="pg_wal_replay_pause"; repl_resume_command="pg_wal_replay_resume"; repl_status_command="pg_is_wal_replay_paused"; }
@@ -765,9 +711,9 @@ function pg_repl_ctl {
 
 function pg_dump_all() {
     local err=0; local dir="${1}"
-    command -v pg_dump > /dev/null 2>&1 || { show_error "No pg_dump installed!" "${FUNCNAME}"; return 1; }
-    command -v psql > /dev/null 2>&1 || { show_error "No psql installed!" "${FUNCNAME}"; return 1; }
-    command -v pg_dumpall > /dev/null 2>&1 || { show_error "No pg_dumpall installed!" "${FUNCNAME}"; return 1; }
+    have_binary pg_dump || { show_error "No pg_dump installed!" "${FUNCNAME}"; return 1; }
+    have_binary psql || { show_error "No psql installed!" "${FUNCNAME}"; return 1; }
+    have_binary pg_dumpall || { show_error "No pg_dumpall installed!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     test "${pg_peplica_pause}" -ne 0 && { pg_repl_ctl pause || local err=1; }
@@ -791,7 +737,7 @@ function pg_dump_all() {
 
 function pg_dump_db() {
     local err=0; local dir="${1}"; local db="${2}"; local prefix="${3}"
-    command -v pg_dump > /dev/null 2>&1 || { show_error "No pg_dump installed!" "${FUNCNAME}"; return 1; }
+    have_binary pg_dump || { show_error "No pg_dump installed!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || test "${#}" -eq 3 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     show_notice "Dumping database ${db}" "${FUNCNAME}"
@@ -808,7 +754,7 @@ function pg_dump_db() {
 
 function redis_rdb_backup() {
     local err=0; local dir="${1}"; local seconds=0
-    command -v redis-cli > /dev/null || { show_error "Not found redis-cli." "${FUNCNAME}"; return 1;}
+    have_binary redis-cli || { show_error "Not found redis-cli." "${FUNCNAME}"; return 1;}
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     lastsave_before=$(echo lastsave | redis-cli "${redis_cli_opts[@]}")
@@ -838,37 +784,52 @@ function backup_gitlab() {
 }
 
 function rclone_sync() {
-    local err=0; local source="${1}"; local target="${2}"
+    local source="${1}"
+    local target="${2}"
+    local mode="${3:-default}"
+    local err=0
+    local start_time
+    local end_time
+    local duration
+    local protocol
     local detected_domain
-    command -v rclone > /dev/null 2>&1 || { show_error "Install rclone first!" "${FUNCNAME[0]}"; return 1; }
-    test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME[0]}"; return 1; }
+    local upload_domain
+    local remote_backup_values
+    local remote_files
+    local remote_size
+    have_binary rclone || { show_error "Install rclone first!" "${FUNCNAME[0]}"; return 1; }
+    test "${#}" -eq 2 || test "${#}" -eq 3 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME[0]}"; return 1; }
     show_notice "Sync ${source} to ${target}" "${FUNCNAME[0]}"
+    start_time=$(date +%s)
     rclone -v "${rclone_sync_opts[@]}" sync "${source}" "${target}" 2>&1 || {
         local rclone_error=$?; local ignore_error=0
         for code in "${rclone_ignore_codes[@]}"; do
             test "${code}" -eq "${rclone_error}" && { ignore_error=1; break; }
         done
-        test "${ignore_error}" -eq 0 && show_error "Error on rclone_sync ${source} to ${target} with code ${rclone_error}" "${FUNCNAME[0]}"; local err=1
+        test "${ignore_error}" -eq 0 && show_error "Error on rclone_sync ${source} to ${target} with code ${rclone_error}" "${FUNCNAME[0]}"; err=1
     }
-    test "${no_rmt_bckp_chck}" -eq 0 && {
-        pushgateway_storage_name="${target%:*}"
-        pushgateway_upload_util="rclone"
-        pushgateway_upload_protocol=$(rclone config show ${target%:*} | grep 'type' | awk '{print $3}')
-        detected_domain=$(rclone config show ${target%:*} | grep 'endpoint' | awk '{print $3}')
-        test -z "${detected_domain}" || pushgateway_upload_domain="${detected_domain}"
-        rmt_bckp_values=$(rclone size "${target}")
-        glbl_rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total objects:' | awk '{print $3}')
-        glbl_rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep -oP '\(\d+\sByte.*?\)' | grep -oP '\d+')
+    test "${mode}" != "no_check" && {
+        remote_backup_values=$(rclone size "${target}")
+        remote_files=$(echo "${remote_backup_values}" | grep 'Total objects:' | awk '{print $3}')
+        remote_size=$(echo "${remote_backup_values}" | grep -oP '\(\d+\sByte.*?\)' | grep -oP '\d+')
+    }
+    need_metrics && {
+        end_time=$(date +%s)
+        duration=$((end_time-start_time))
+        protocol=$(rclone config show ${target%:*} | grep 'type' | awk '{print $3}')
+        detected_domain=$(rclone config show ${target%:*} | grep -Em1 'endpoint|host' | awk '{print $3}')
+        test -z "${detected_domain}" || upload_domain="${detected_domain}"
+        pushgateway_send_upload_details "rclone" "${protocol}" "${upload_domain:-unknown}" "${duration}" "${remote_size:-unknown}" "${remote_files:-unknown}"
     }
     return "${err}"
 }
 
 function rclone_purge() {
     local err=0; local target="${1}"; local count="${2}"; local rclone_conf="${rclone_alternative_conf:-/root/.config/rclone/rclone.conf}"
-    command -v rclone > /dev/null 2>&1 || { show_error "Install rclone first!" "${FUNCNAME}"; return 1; }
-    test -f "${rclone_conf}" || { show_error "Couldn't find rclone configuration file (${rclone_conf}), you need to configure rclone or set alternative path to config by rclone_alternative_conf variable." "${FUNCNAME}"; return 1; }
+    have_binary rclone || { show_error "Install rclone first!" "${FUNCNAME}"; return 1; }
+    test -f "${rclone_conf}" || { show_error "Can't find rclone configuration file (${rclone_conf}), you need to configure rclone or set alternative path to config by rclone_alternative_conf variable." "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
-    rclone -q lsd "${target}"> /dev/null 2>&1 || { show_error "Smth went wrong while listing storage."; local err=1; }
+    rclone -q lsd "${target}"> /dev/null 2>&1 || { show_error "Smth went wrong while listing rclone storages."; local err=1; }
     total=$(rclone -q lsd "${target}" | wc -l)
     to_delete=$((total - count))
     test "${to_delete}" -gt 0 && {
@@ -881,36 +842,47 @@ function rclone_purge() {
 }
 
 function awscli_sync() {
-    local err=0; local source="${1}"; local target="${2}"; local profile="${3}"
-    command -v aws > /dev/null 2>&1 || { show_error "Install awscli first!" "${FUNCNAME}"; return 1; }
-    test "${#}" -eq 2 || test "${#}" -eq 3 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
+    local source="${1}"
+    local target="${2}"
+    local profile="${3}"
+    local mode="${4:-default}"
+    local awscli_profile=()
+    local err=0
+    local start_time
+    local end_time
+    local duration
+    local detected_domain
+    local upload_domain
+    local remote_files
+    local remote_size
+    local protocol
+    have_binary aws || { show_error "Install awscli first!" "${FUNCNAME}"; return 1; }
+    test "${#}" -eq 2 || test "${#}" -eq 3 || test "${#}" -eq 4 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${source}" || { show_error "Directory ${source} does not exist!" "${FUNCNAME}"; return 1; }
     show_notice "Upload ${source} to ${target}" "${FUNCNAME}"
-    test -n "${profile}" && awscli_sync_opts+=(--profile "${profile}")
-    nice -n 19 ionice -c 3 aws s3 sync "${source}" "${target}" "${awscli_sync_opts[@]}" "${awscli_exclude[@]}" || {
+    test -n "${profile}" && awscli_profile=(--profile "${profile}")
+    start_time=$(date +%s)
+    nice -n 19 ionice -c 3 aws s3 sync "${source}" "${target}" "${awscli_profile[@]}" "${awscli_sync_opts[@]}" "${awscli_exclude[@]}" || {
         test "${?}" == "1" && { show_error "Error on awscli_sync ${source} to ${target}" "${FUNCNAME}"; local err=1; }
     }
-    test "${no_rmt_bckp_chck}" -eq 0 && {
-        pushgateway_storage_name=$(echo ${target} | awk -F/ '{print$3}')
-        pushgateway_upload_util="awscli"
-        pushgateway_upload_protocol="s3"
-        test -n "${profile}" && {
-            pushgateway_upload_domain=$(aws configure get s3.endpoint_url --profile "${profile}" | awk -F/ '{print $3}')
-            rmt_bckp_values=$(aws s3 ls --recursive --summarize "${target}" --profile "${profile}" | tail -2)
-        }
-        test -n "${profile}" || {
-            pushgateway_upload_domain=$(aws configure get s3.endpoint_url | awk -F/ '{print $3}')
-            rmt_bckp_values=$(aws s3 ls --recursive --summarize "${target}" | tail -2)
-        }
-        glbl_rmt_bckp_files_count=$(echo "${rmt_bckp_values}" | grep 'Total Objects:' | grep -oP '\d+')
-        glbl_rmt_bckp_size=$(echo "${rmt_bckp_values}" | grep 'Total Size:' | grep -oP '\d+')
+    test "${mode}" != "no_check" && {
+        rmt_bckp_values=$(aws s3 ls --recursive --summarize "${target}" "${awscli_profile[@]}" | tail -2)
+        remote_files=$(echo "${rmt_bckp_values}" | grep 'Total Objects:' | grep -oP '\d+')
+        remote_size=$(echo "${rmt_bckp_values}" | grep 'Total Size:' | grep -oP '\d+')
+    }
+    need_metrics && {
+        end_time=$(date +%s)
+        duration=$((end_time-start_time))
+        detected_domain=$(aws configure get s3.endpoint_url "${awscli_profile[@]}" | awk -F/ '{print $3}')
+        test -z "${detected_domain}" || upload_domain="${detected_domain}"
+        pushgateway_send_upload_details "awscli" "s3" "${upload_domain:-unknown}" "${duration}" "${remote_size:-unknown}" "${remote_files:-unknown}"
     }
     return "${err}"
 }
 
 function awscli_clean() {
     local err=0; local target="${1}"; local count="${2}"; local profile="${3}"
-    command -v aws > /dev/null 2>&1 || { show_error "Install awscli first!" "${FUNCNAME}"; return 1; }
+    have_binary aws || { show_error "Install awscli first!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || test "${#}" -eq 3 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -n "${profile}" && awscli_purge_opts+=(--profile "${profile}")
     total=$(aws s3 ls "${target}"/ "${awscli_purge_opts[@]}" | grep -cE '20[0-9][0-9][0-1][0-9][0-9][0-9]')
@@ -925,30 +897,46 @@ function awscli_clean() {
 }
 
 function minio_mirror() {
-    local err=0; local source="${1}"; local target="${2}"
-    command -v minio-client > /dev/null 2>&1 || { show_error "No minio-client binary found, skipping mirroring." "${FUNCNAME}"; return 1; }
-    test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
+    local source="${1}"
+    local target="${2}"
+    local mode="${3:-default}"
+    local err=0
+    local start_time
+    local end_time
+    local duration
+    local protocol
+    local detected_domain
+    local upload_domain
+    local remote_files
+    local remote_size
+    have_binary minio-client || { show_error "No minio-client binary found, skipping mirroring." "${FUNCNAME}"; return 1; }
+    test "${#}" -eq 2 || test "${#}" -eq 3 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${source}" || { show_error "Directory ${source} does not exist!" "${FUNCNAME}"; return 1; }
     show_notice "Mirroring ${source} to ${target}" "${FUNCNAME}"
+    start_time=$(date +%s)
     nice -n 19 ionice -c 3 minio-client mirror --quiet --overwrite --remove "${minio_mirror_opts[@]}" "${minio_exclude[@]}" "${source}" "${target}" || {
-        test "${?}" == "1" && { show_error "An error has occur when mirroring ${source} to ${target}" "${FUNCNAME}"; local err=1; }
+        test "${?}" == "1" && { show_error "An error occured on mirroring ${source} to ${target}" "${FUNCNAME}"; err=1; }
     }
-    test "${no_rmt_bckp_chck}" -eq 0 && {
-        command -v jq > /dev/null 2>&1 || { show_error "No jq binary found. Install jq or set no_rmt_bckp_chck=1." "${FUNCNAME}"; return 1; }
-        pushgateway_storage_name="${target%%/*}"
-        pushgateway_upload_util="minio-client"
-        pushgateway_upload_protocol="s3"
-        pushgateway_upload_domain=$(minio-client alias list ${target%%/*} --json | jq -r .URL | awk -F/ '{print $3}')
+    test "${mode}" != "no_check" && {
+        have_binary jq || { show_error "No jq binary found. Install jq or set mode to no_check." "${FUNCNAME}"; return 1; }
         minio_json=$(minio-client ls -r --summarize --json "${target}")
-        glbl_rmt_bckp_files_count=$(jq '. | select(.totalObjects | length >= 1) | .totalObjects' <<< "${minio_json}")
-        glbl_rmt_bckp_size=$(jq '. | select(.totalObjects | length >= 1) | .totalSize' <<< "${minio_json}")
+        remote_files=$(jq '. | select(.totalObjects | length >= 1) | .totalObjects' <<< "${minio_json}")
+        remote_size=$(jq '. | select(.totalObjects | length >= 1) | .totalSize' <<< "${minio_json}")
+    }
+    need_metrics && {
+        have_binary jq || { show_error "No jq binary found. Can't collect metrics properly." "${FUNCNAME}"; return 1; }
+        detected_domain=$(minio-client alias list ${target%%/*} --json | jq -r .URL | awk -F/ '{print $3}')
+        end_time=$(date +%s)
+        duration=$((end_time-start_time))
+        test -z "${detected_domain}" || upload_domain="${detected_domain}"
+        pushgateway_send_upload_details "minio-client" "s3" "${upload_domain:-unknown}" "${duration}" "${remote_size:-unknown}" "${remote_files:-unknown}"
     }
     return "${err}"
 }
 
 function minio_clean() {
     local err=0; local target="${1}"; local count="${2}"
-    command -v minio-client > /dev/null 2>&1 || { show_error "No minio-client binary found, skipping cleaning." "${FUNCNAME}"; return 1; }
+    have_binary minio-client || { show_error "No minio-client binary found, skipping cleaning." "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     total=$(minio-client ls "${target}"  | grep -cE '20[0-9][0-9][0-1][0-9][0-9][0-9]')
     to_delete=$((total - count))
@@ -963,7 +951,7 @@ function minio_clean() {
 
 function ftp_mirror_dir() {
     local err=0; local source="${1}"; local target="${2}"
-    command -v lftp > /dev/null 2>&1 || { show_error "Install lftp first!" "$FUNCNAME"; return 1; }
+    have_binary lftp || { show_error "Install lftp first!" "$FUNCNAME"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -z "${ftp_host}" && test -z "${ftp_user}" && test -z "${ftp_pass}" && { show_error "Wrong usage of the function! Set \$ftp_host, \$ftp_user, \$ftp_pass variables." "${FUNCNAME}"; return 1; }
     show_notice "Mirroring ${source} to ftp://${ftp_host}${target}" "${FUNCNAME}"
@@ -973,7 +961,7 @@ function ftp_mirror_dir() {
 
 function ftp_put_file() {
     local err=0; local source="${1}"; local target="${2}"
-    command -v lftp > /dev/null 2>&1 || { show_error "Install lftp first!" "${FUNCNAME}"; return 1; }
+    have_binary lftp || { show_error "Install lftp first!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -z "${ftp_host}" && test -z "${ftp_user}" && test -z "${ftp_pass}" && { show_error "Wrong usage of the function! Set \$ftp_host, \$ftp_user, \$ftp_pass variables." "${FUNCNAME}"; return 1; }
     show_notice "Uploading ${source} to ftp://${ftp_host}${target}" "${FUNCNAME}"
@@ -983,7 +971,7 @@ function ftp_put_file() {
 
 function ftp_clean_dir() {
     local total=0; local err=0; local total=0; local target="${1}"; local count="${2}"
-    command -v lftp > /dev/null 2>&1 || { show_error "Install lftp first!" "${FUNCNAME}"; return 1; }
+    have_binary lftp || { show_error "Install lftp first!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -z "${ftp_host}" || test -z "${ftp_user}" || test -z "${ftp_pass}" && { show_error "Wrong usage of the function! Set \$ftp_host, \$ftp_user, \$ftp_pass variables." "${FUNCNAME}"; return 1; }
     lftp -e "cd ${target}; exit" -u ${ftp_user},${ftp_pass} ${ftp_host} > /dev/null 2>&1 || { show_error "No folder ${target} in ${ftp_user}@${ftp_host} or wrong connection options!" "${FUNCNAME}"; return 1; }
@@ -1001,7 +989,7 @@ function ftp_clean_dir() {
 
 function rdiff_backup() {
     local err=0; local src="${1}"; local dst="${2}"
-    command -v rdiff-backup > /dev/null 2>&1 || { show_error "No rdiff-backup installed!" "${FUNCNAME}"; return 1; }
+    have_binary rdiff-backup || { show_error "No rdiff-backup installed!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dst}" || mkdir -p "${dst}"
     show_notice "Making rdiff backup" "${FUNCNAME}"
@@ -1011,7 +999,7 @@ function rdiff_backup() {
 
 function rdiff_clean_by_quantity() {
     local err=0; local target="${1}"; local quantity="${2}"
-    command -v rdiff-backup > /dev/null 2>&1 || { show_error "No rdiff-backup installed!" "${FUNCNAME}"; return 1; }
+    have_binary rdiff-backup || { show_error "No rdiff-backup installed!" "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${target}" || { show_error "Directory not found: ${target}" "${FUNCNAME}"; return 1; }
     show_notice "Cleaning rdiff backup if more then ${quantity} copies are available" "${FUNCNAME}"
@@ -1029,7 +1017,7 @@ function elastic_backup() {
     local err=0; local elastic_repo="${1}"; local elastic_url="http://${elastic_host}:${elastic_port}"
     test -z "${elastic_host}" || test -z "${elastic_port}" && { show_error "Wrong usage of the function! Set \$elastic_host and \$elastic_port variables." "${FUNCNAME}"; return 1; }
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
-    command -v curl > /dev/null || { show_error "Curl binary is not available, check it."; return 1; }
+    have_binary curl || { show_error "Curl binary is not available, check it."; return 1; }
     show_notice "Creating snapshots in repository \"${elastic_repo}\"" "${FUNCNAME}"
     for indice in $(curl -XGET "${elastic_url}/_cat/indices" 2>/dev/null | awk '{print $3}'); do
         show_notice "Creating snapshot_${indice}_${current_date}" "${FUNCNAME}"
@@ -1045,7 +1033,7 @@ function elastic_clean() {
     local err=0; local elastic_repo="${1}"; local elastic_url="http://${elastic_host}:${elastic_port}"; local snapshot_lifelimit=$((${2}*86400))
     test -z "${elastic_host}" || test -z "${elastic_port}" && { show_error "Wrong usage of the function! Set \$elastic_host and \$elastic_port variables." "${FUNCNAME}"; return 1; }
     test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
-    command -v curl > /dev/null || { show_error "Curl binary is not available, check it."; return 1; }
+    have_binary curl || { show_error "Curl binary is not available, check it."; return 1; }
     show_notice "Deleting old snapshots from repository \"${elastic_repo}\"" "${FUNCNAME}"
     for snapshot in $(curl -s -XGET "${elastic_url}/_cat/snapshots/${elastic_repo}" | awk '{print $1}'); do
         snapshot_timestamp=$(curl -s -XGET "${elastic_url}/_cat/snapshots/${elastic_repo}" | grep -E "^${snapshot}\s" | awk '{print $3}')
@@ -1064,7 +1052,7 @@ function elastic_clean() {
 
 function clickhouse_dump_all() {
     local err="0"; local dir="${1}";
-    command -v clickhouse-client > /dev/null 2>&1 || { show_error "No clickhouse-client installed!" "${FUNCNAME}"; return "1"; }
+    have_binary clickhouse-client || { show_error "No clickhouse-client installed!" "${FUNCNAME}"; return "1"; }
     test "${#}" -eq "1" || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return "1"; }
     test -z "${ch_host}" || test -z "${ch_user}" && { show_error "Wrong usage of the function! Set at least \$ch_host and \$ch_user variables." "${FUNCNAME}"; return 1; }
     test -z "${ch_pass}" || ch_credentials=(--host="${ch_host}" --port="${ch_port}" --user="${ch_user}" --password="${ch_pass}")
@@ -1095,7 +1083,7 @@ function clickhouse_dump_all() {
 
 function consul_backup() {
     local dir="${1}"
-    command -v consul > /dev/null || { show_error "Not found consul." "${FUNCNAME}"; return 1;}
+    have_binary consul || { show_error "Not found consul." "${FUNCNAME}"; return 1;}
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     show_notice "Start saving consul shapshot into the ${dir}..."
@@ -1107,7 +1095,7 @@ function consul_backup() {
 function rsync_dir() {
     local err=0; local source=${1}; local target="${2}"
     test "${#}" -eq 2 || { show_error "Wrong function usage!" "${FUNCNAME}"; return 1; }
-    command -v rsync > /dev/null 2>&1 || { show_error "Rsync utility didn't found!" "${FUNCNAME}"; return 1; }
+    have_binary rsync || { show_error "Rsync utility didn't found!" "${FUNCNAME}"; return 1; }
     test -d "${target}" || mkdir -p "${target}"
     show_notice "Syncing ${source} to ${target} with rsync..." "${FUNCNAME}"
     nice -n 19 ionice -c 3 rsync "${rsync_opts[@]}" "${source}" "${target}" || \
@@ -1134,7 +1122,7 @@ function mysql_lxc_hotcopy_all() {
 
 function rabbitmq_backup() {
     local err=0; local dir="${1}"
-    command -v rabbitmqadmin > /dev/null 2>&1 || {
+    have_binary rabbitmqadmin || {
         wget -q "http://${rabbitmq_host}/cli/rabbitmqadmin" -O /usr/local/sbin/rabbitmqadmin || {
             show_error "No rabbitmqadmin installed and downloading it from http://${rabbitmq_host}/cli/rabbitmqadmin imposible!" "${FUNCNAME}"
             return 1

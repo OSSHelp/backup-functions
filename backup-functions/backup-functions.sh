@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=4.0.1
+bfver=4.0.2
 
 ## default variables
 myhostname=$(hostname -f)
@@ -817,7 +817,7 @@ function rclone_sync() {
         end_time=$(date +%s)
         duration=$((end_time-start_time))
         protocol=$(rclone config show ${target%:*} | grep 'type' | awk '{print $3}')
-        detected_domain=$(rclone config show ${target%:*} | grep -Em1 'endpoint|host' | awk '{print $3}')
+        detected_domain=$(rclone config show ${target%:*} | grep -Em1 'endpoint|host' | awk '{print $3}' | sed -r 's/(\w+:\/\/)?(.+)/\2/')
         test -z "${detected_domain}" || upload_domain="${detected_domain}"
         pushgateway_send_upload_details "rclone" "${protocol}" "${upload_domain:-unknown}" "${duration}" "${remote_size:-unknown}" "${remote_files:-unknown}"
     }
@@ -873,7 +873,7 @@ function awscli_sync() {
     need_metrics && {
         end_time=$(date +%s)
         duration=$((end_time-start_time))
-        detected_domain=$(aws configure get s3.endpoint_url "${awscli_profile[@]}" | awk -F/ '{print $3}')
+        detected_domain=$(aws configure get s3.endpoint_url "${awscli_profile[@]}" | awk '{print $3}' | sed -r 's/(\w+:\/\/)?(.+)/\2/')
         test -z "${detected_domain}" || upload_domain="${detected_domain}"
         pushgateway_send_upload_details "awscli" "s3" "${upload_domain:-unknown}" "${duration}" "${remote_size:-unknown}" "${remote_files:-unknown}"
     }
@@ -925,7 +925,7 @@ function minio_mirror() {
     }
     need_metrics && {
         have_binary jq || { show_error "No jq binary found. Can't collect metrics properly." "${FUNCNAME}"; return 1; }
-        detected_domain=$(minio-client alias list ${target%%/*} --json | jq -r .URL | awk -F/ '{print $3}')
+        detected_domain=$(minio-client alias list ${target%%/*} --json | jq -r .URL | awk '{print $3}' | sed -r 's/(\w+:\/\/)?(.+)/\2/')
         end_time=$(date +%s)
         duration=$((end_time-start_time))
         test -z "${detected_domain}" || upload_domain="${detected_domain}"

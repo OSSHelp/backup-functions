@@ -1,5 +1,12 @@
 # Changelog
 
+## v4.0.5
+
+* Fixed domain detection for Backblaze
+* Fixed and improved domain detection for minio/awscli
+* Fixed protocol detection in rclone_sync()
+* Improved domain detection in upload functions (minio/awscli/rclone)
+
 ## v4.0.0
 
 * Metric export completely switched to pushgateway-functions

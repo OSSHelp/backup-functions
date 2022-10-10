@@ -5,7 +5,7 @@ umask 0077
 export LANG=C
 export LC_ALL=C
 
-bfver=4.0.4
+bfver=4.0.5
 
 script_name="backup-functions.sh"
 script_path="/usr/local/include/osshelp"

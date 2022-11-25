@@ -726,11 +726,14 @@ function pg_dump_all() {
             backup_size_and_files_count "${dir}/${current_db}"* || local err=1;
         } || { show_error "Error on dumping database ${current_db}" "${FUNCNAME}"; local err=1; }
     done
-    show_notice "Dumping global objects" "${FUNCNAME}"
-    pg_dumpall "${pg_dump_opts[@]}" --globals-only > "${dir}/globals.sql" && \
-    nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/globals.sql" || \
-    { show_error "Error on dumping global objects" "${FUNCNAME}"; local err=1; }
-    backup_size_and_files_count "${dir}/globals.sql"* || local err=1;
+    # Managed servers support. Admin user in managed servers hasn't privileges for globals
+    test "${POSTGRES_SKIP_GLOBALS:-0}" -ne 0 || {
+        show_notice "Dumping global objects" "${FUNCNAME}"
+        pg_dumpall "${pg_dump_opts[@]}" --globals-only > "${dir}/globals.sql" && \
+        nice -n 19 ionice -c 3 "${archiver_prog}" "${archiver_opts[@]}" -f "${dir}/globals.sql" || \
+        { show_error "Error on dumping global objects" "${FUNCNAME}"; local err=1; }
+        backup_size_and_files_count "${dir}/globals.sql"* || local err=1;
+    }
     test "${pg_peplica_pause}" -ne 0 && { pg_repl_ctl resume || local err=1; }
     return "${err}"
 }

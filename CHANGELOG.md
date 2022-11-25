@@ -1,5 +1,9 @@
 # Changelog
 
+## v4.0.6
+
+* Added managed PostgreSQL servers support (POSTGRES_SKIP_GLOBALS env variable).
+
 ## v4.0.5
 
 * Fixed domain detection for Backblaze

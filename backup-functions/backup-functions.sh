@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=4.0.5
+bfver=4.0.6
 
 ## default variables
 myhostname=$(hostname -f)

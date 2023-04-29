@@ -1,5 +1,10 @@
 # Changelog
 
+## v4.1.1
+
+* Updated mongo_dump_all function. Now it can use both shells: new mongosh or old mongo shell. Functions works with MongoDB 3.2+. Use mongosh for MongoDB 5.0+.
+* Added mongo_dump_db function. Function works with MongoDB 3.2+.
+
 ## v4.0.6
 
 * Added managed PostgreSQL servers support (POSTGRES_SKIP_GLOBALS env variable).

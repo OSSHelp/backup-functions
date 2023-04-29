@@ -8,7 +8,7 @@
 umask 0077
 export LANG=C
 export LC_ALL=C
-bfver=4.0.6
+bfver=4.1.1
 
 ## default variables
 myhostname=$(hostname -f)
@@ -78,6 +78,7 @@ mysql_xtra_backup_opts=()
 ## example: mongo_ignore_databases='config|some_db'
 mongo_opts=()
 mongo_ignore_databases=''
+use_old_mongo_shell=0
 
 ## tar arrays
 tar_exclude=() #tar_exclude=(--exclude=*cache*/* --exclude=*log*/*)
@@ -610,12 +611,20 @@ function sqlite_dump_db() {
     return "${err}"
 }
 
+# You can use this function with MongoDB 3.2+
 function mongo_dump_all() {
     local err=0; local dir="${1}"
     have_binary mongodump || { show_error "No mongodump installed." "${FUNCNAME}"; return 1;}
+    have_binary mongosh || { use_old_mongo_shell=1 && have_binary mongo || { show_error "No mongo shell installed." "${FUNCNAME}"; return 1; } }
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
-    for current_db in $(echo 'show dbs' | mongo "${mongo_opts[@]}" --quiet | awk '{print $1}' | grep -vE "^(${mongo_ignore_databases})$"); do
+    if [[ "${use_old_mongo_shell}" -eq 1 ]]
+    then
+        db_list=($(echo 'show dbs' | mongo "${mongo_opts[@]}" --quiet | awk '{print $1}' | grep -vE "^(${mongo_ignore_databases})$"))
+    else
+        db_list=($(mongosh "${mongo_opts[@]}" --quiet --eval  "show databases" | awk '{print $1}' | grep -vE "^(${mongo_ignore_databases})$"))
+    fi
+    for current_db in "${db_list[@]}"; do
         {
             show_notice "Dumping database ${current_db}" "${FUNCNAME}"
             test "${no_compress}" -ne 0 && nice -n 19 ionice -c 3 mongodump "${mongo_opts[@]}" --quiet -d "${current_db}" --archive="${dir}/${current_db}.dump"
@@ -627,9 +636,27 @@ function mongo_dump_all() {
     return "${err}"
 }
 
+# You can use this function with MongoDB 3.2+
+function mongo_dump_db() {
+    local err=0; local db="${1}"; local dir="${2}"
+    have_binary mongodump || { show_error "No mongodump installed." "${FUNCNAME}"; return 1;}
+    test "${#}" -eq 2 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
+    test -d "${dir}" || mkdir -p "${dir}"
+    show_notice "Dumping database ${db}" "${FUNCNAME}"
+    {
+        test "${no_compress}" -ne 0 && nice -n 19 ionice -c 3 mongodump "${mongo_opts[@]}" --quiet -d "${db}" --archive="${dir}/${db}.dump"
+        test "${no_compress}" -eq 0 && nice -n 19 ionice -c 3 mongodump "${mongo_opts[@]}" --quiet -d "${db}" --archive | \
+        "${archiver_prog}" "${archiver_opts[@]}" > "${dir}/${db}.${compress_ext}"
+        backup_size_and_files_count "${dir}/${db}"* || local err=1;
+    } || { show_error "Error on dumping database ${db}" "${FUNCNAME}"; local err=1; }
+    return "${err}"
+}
+
+# You can use this function with MongoDB lower than 5.0
 function mongo_dump_all_old() {
     local err=0; local dir="${1}"
     have_binary mongodump || { show_error "No mongodump installed." "${FUNCNAME}"; return 1;}
+    have_binary mongo || { show_error "No olde mongo shell installed." "${FUNCNAME}"; return 1;}
     test "${#}" -eq 1 || { show_error "Wrong usage of the function! Args=${*}" "${FUNCNAME}"; return 1; }
     test -d "${dir}" || mkdir -p "${dir}"
     for current_db in $(echo 'show dbs' | mongo "${mongo_opts[@]}" --quiet | awk '{print $1}' | grep -vE "^(${mongo_ignore_databases})$"); do
